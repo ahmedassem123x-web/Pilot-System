@@ -69,7 +69,28 @@ export interface Workflow {
   steps: WorkflowStep[]; is_active: boolean;
 }
 export interface Template { id: number; name: string; language: string; category: string; approval_status: string; }
-export interface User { id: number; full_name: string; email: string; role: Role; is_active: boolean; }
+export interface User {
+  id: number; full_name: string; email: string; role: Role; is_active: boolean;
+  department?: string | null; sections?: string[]; actions?: Record<string, string[]>;
+  is_primary_admin?: boolean; created_at?: string | null;
+}
+export type MeUser = User;
+export interface Department { key: string; label_ar: string; }
+export const DEPARTMENTS: { key: string; ar: string }[] = [
+  { key: 'Operations', ar: 'العمليات' },
+  { key: 'Finance Coordination', ar: 'التنسيق المالي' },
+  { key: 'Customer Support', ar: 'دعم العملاء' },
+  { key: 'Administration', ar: 'الإدارة' },
+];
+export const SECTIONS_AR: Record<string, string> = {
+  dashboard: 'لوحة القيادة', contracts: 'العقود', inbox: 'الإنبكس', tasks: 'المهام',
+  whatsapp: 'واتساب', automation: 'الأتمتة', users: 'المستخدمون', audit: 'التدقيق', settings: 'إعدادات النظام',
+};
+export const SECTIONS_LIST = ['dashboard', 'contracts', 'inbox', 'tasks', 'whatsapp', 'automation', 'users', 'audit', 'settings'];
+export const ACTION_AR: Record<string, string> = {
+  view: 'عرض', create: 'إنشاء', edit: 'تعديل', approve: 'اعتماد', manage: 'إدارة',
+};
+export const ACTIONS_LIST = ['view', 'create', 'edit', 'approve', 'manage'];
 export interface AuditEntry {
   id: number; actor: string; entity: string; entity_id: number; action: string;
   details: Record<string, unknown>; created_at: string;

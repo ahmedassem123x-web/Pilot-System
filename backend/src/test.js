@@ -1,12 +1,23 @@
 // Pilot System — acceptance tests, run twice for the "success twice" rule.
 // Usage: node src/test.js  (starts the server on a test port, runs, exits)
-// Original 10 checks are kept verbatim in behaviour; new checks cover the
-// extended backend (amend, owner guard, workflow copy, template approval,
-// task complete, plus inbox, checklist, rules/kill-switch, files, reorder).
+// Original 42 checks are kept in behaviour; new checks cover auth,
+// permissions and password hashing. The primary admin is seeded ONLY via
+// environment variables read by the server at startup: when this harness
+// is run without those variables set, it generates a throwaway test-only
+// admin credential in-process (never written to any file) before requiring
+// the server. No real or user-supplied credential appears in this file.
 const { spawn } = require('child_process');
+const crypto = require('crypto');
 const PORT = 3456;
 process.env.PORT = String(PORT);
 delete process.env.WHATSAPP_APP_SECRET;
+if (!process.env.ADMIN_EMAIL || !process.env.ADMIN_INITIAL_PASSWORD) {
+  process.env.ADMIN_EMAIL = 'test-admin@pilot.local';
+  process.env.ADMIN_INITIAL_PASSWORD = 'T' + crypto.randomBytes(16).toString('hex');
+}
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL;
+const ADMIN_PASSWORD = process.env.ADMIN_INITIAL_PASSWORD;
+const genPass = () => 'T' + crypto.randomBytes(12).toString('hex');
 const fs = require('fs');
 const path = require('path');
 // Fresh data for a repeatable test run
@@ -15,10 +26,40 @@ const server = require('./server.js');
 const base = `http://127.0.0.1:${PORT}`;
 let passed = 0, failed = 0;
 function check(name, cond, extra = '') { if (cond) { passed++; console.log('PASS', name); } else { failed++; console.log('FAIL', name, extra); } }
-async function api(p, o) { const r = await fetch(base + p, { headers: { 'Content-Type': 'application/json' }, ...(o || {}) }); let body = {}; try { body = await r.json(); } catch {} return { status: r.status, body }; }
+let token = null;
+async function api(p, o = {}) {
+  const { noAuth, ...rest } = o;
+  const headers = { 'Content-Type': 'application/json' };
+  if (token && !noAuth) headers.Authorization = 'Bearer ' + token;
+  const r = await fetch(base + p, { headers, ...rest });
+  let body = {}; try { body = await r.json(); } catch {} return { status: r.status, body };
+}
+async function apiAs(tok, p, o = {}) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (tok) headers.Authorization = 'Bearer ' + tok;
+  const r = await fetch(base + p, { headers, ...(o || {}) });
+  let body = {}; try { body = await r.json(); } catch {} return { status: r.status, body };
+}
+async function login(email, password) {
+  return api('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }), noAuth: true });
+}
 server.listen(PORT, async () => {
   try {
-    const h = await api('/health'); check('health', h.status === 200 && h.body.ok);
+    const h = await api('/health', { noAuth: true }); check('health', h.status === 200 && h.body.ok);
+
+    // ---- New: auth gate ----
+    const unauth = await api('/api/contracts', { noAuth: true });
+    check('unauthenticated API call rejected (401)', unauth.status === 401, JSON.stringify(unauth.body));
+    const wrongPass = await login(ADMIN_EMAIL, 'wrong-password-not-valid');
+    check('login with wrong password rejected (generic error)', wrongPass.status === 401 && wrongPass.body.error === 'invalid email or password', JSON.stringify(wrongPass.body));
+    const adminLogin = await login(ADMIN_EMAIL, ADMIN_PASSWORD);
+    check('login with seeded admin succeeds and returns a token', adminLogin.status === 200 && !!adminLogin.body.token && adminLogin.body.user && adminLogin.body.user.role === 'owner' && !('password_hash' in adminLogin.body.user), JSON.stringify(adminLogin.body.user));
+    token = adminLogin.body.token;
+    const me = await api('/api/auth/me');
+    check('GET /api/auth/me returns the logged-in owner', me.status === 200 && me.body.email === ADMIN_EMAIL.toLowerCase() && Array.isArray(me.body.sections) && me.body.sections.includes('users'), JSON.stringify(me.body));
+    const deps = await api('/api/departments');
+    check('departments list has 4 departments', Array.isArray(deps.body) && deps.body.length === 4, JSON.stringify(deps.body));
+
     const c = await api('/api/contracts', { method: 'POST', body: JSON.stringify({ buyer_phone: '+967700000001', seller_phone: '+967700000002', product_description: 'هاتف تجريبي', amount: 100 }) });
     check('create contract draft', c.status === 201 && c.body.state === 'draft', JSON.stringify(c.body));
     const id = c.body.id;
@@ -58,17 +99,53 @@ server.listen(PORT, async () => {
     check('attachments list', files.status === 200 && files.body.length === 1 && files.body[0].filename === 'contract-signed.pdf');
 
     // ---- New: owner-protection guard ----
-    const owner1 = await api('/api/users', { method: 'POST', body: JSON.stringify({ full_name: 'المالك الأول', email: 'owner1@test.local', role: 'owner' }) });
+    const owner1Pass = genPass();
+    const owner1 = await api('/api/users', { method: 'POST', body: JSON.stringify({ full_name: 'المالك الأول', email: 'owner1@test.local', role: 'owner', department: 'Administration', password: owner1Pass }) });
     check('owner user created', owner1.status === 201 && owner1.body.role === 'owner');
-    const badRole = await api('/api/users', { method: 'POST', body: JSON.stringify({ full_name: 'X', email: 'x@test.local', role: 'superadmin' }) });
+    const badRole = await api('/api/users', { method: 'POST', body: JSON.stringify({ full_name: 'X', email: 'x@test.local', role: 'superadmin', department: 'Operations', password: genPass() }) });
     check('invalid role rejected (5 roles only)', badRole.status === 400);
-    const disableOnly = await api(`/api/users/${owner1.body.id}/disable`, { method: 'POST', body: JSON.stringify({}) });
-    check('owner-protection: disable only active owner refused', disableOnly.status === 400, JSON.stringify(disableOnly.body));
-    const deleteOnly = await api(`/api/users/${owner1.body.id}`, { method: 'DELETE' });
-    check('owner-protection: delete only active owner refused', deleteOnly.status === 400, JSON.stringify(deleteOnly.body));
-    const owner2 = await api('/api/users', { method: 'POST', body: JSON.stringify({ full_name: 'المالك الثاني', email: 'owner2@test.local', role: 'owner' }) });
+    // NOTE: with a seeded primary admin (an active owner who can never be
+    // disabled/deleted) present, the old "only active owner" API scenario
+    // cannot arise: the primary admin is always the fallback owner. The
+    // only-owner guard stays in the server as defence-in-depth; the API
+    // test now verifies the equivalent live protection (see the primary
+    // admin checks at the end) plus disable/enable of a second owner.
     const disableOk = await api(`/api/users/${owner1.body.id}/disable`, { method: 'POST', body: JSON.stringify({}) });
-    check('disable succeeds once a second active owner exists', disableOk.status === 200 && disableOk.body.is_active === false, JSON.stringify(disableOk.body));
+    check('disable succeeds while primary admin remains active owner', disableOk.status === 200 && disableOk.body.is_active === false, JSON.stringify(disableOk.body));
+    const enableOk = await api(`/api/users/${owner1.body.id}/enable`, { method: 'POST', body: JSON.stringify({}) });
+    check('enable owner succeeds', enableOk.status === 200 && enableOk.body.is_active === true, JSON.stringify(enableOk.body));
+    const owner2 = await api('/api/users', { method: 'POST', body: JSON.stringify({ full_name: 'المالك الثاني', email: 'owner2@test.local', role: 'owner', department: 'Administration', password: genPass() }) });
+    check('second owner created', owner2.status === 201 && owner2.body.role === 'owner');
+
+    // ---- New: seeded admin can create a user; new user can log in ----
+    const empPass = genPass();
+    const emp = await api('/api/users', { method: 'POST', body: JSON.stringify({ full_name: 'موظف اختبار', email: 'employee@test.local', role: 'ops_employee', department: 'Operations', password: empPass }) });
+    check('seeded admin can create a user', emp.status === 201 && emp.body.email === 'employee@test.local' && !('password_hash' in emp.body), JSON.stringify(emp.body));
+    const empLogin = await login('employee@test.local', empPass);
+    check('new user can log in', empLogin.status === 200 && !!empLogin.body.token, JSON.stringify(empLogin.body));
+    // Password stored hashed, never plaintext, in the data file.
+    let storedHash = '';
+    try {
+      const raw = JSON.parse(fs.readFileSync(path.join(__dirname, 'data.json'), 'utf8'));
+      const stored = (raw.users || []).find((u) => u.email === 'employee@test.local');
+      storedHash = stored ? (stored.password_hash || '') : '';
+    } catch {}
+    check('password stored hashed not plain', storedHash.startsWith('scrypt:') && !storedHash.includes(empPass), storedHash.slice(0, 20) + '...');
+    // Disabled user cannot log in.
+    await api(`/api/users/${emp.body.id}/disable`, { method: 'POST', body: JSON.stringify({}) });
+    const disabledLogin = await login('employee@test.local', empPass);
+    check('disabled user cannot log in', disabledLogin.status === 401 && disabledLogin.body.error === 'invalid email or password', JSON.stringify(disabledLogin.body));
+    await api(`/api/users/${emp.body.id}/enable`, { method: 'POST', body: JSON.stringify({}) });
+
+    // ---- New: user without a section permission is rejected by the backend (403) ----
+    const viewerPass = genPass();
+    const viewer = await api('/api/users', { method: 'POST', body: JSON.stringify({ full_name: 'مشاهد اختبار', email: 'viewer@test.local', role: 'viewer', department: 'Customer Support', password: viewerPass }) });
+    const viewerLogin = await login('viewer@test.local', viewerPass);
+    const viewerToken = viewerLogin.body.token;
+    const viewerUsers = await apiAs(viewerToken, '/api/users');
+    check('user without users permission rejected for users endpoint (403)', viewerUsers.status === 403, JSON.stringify(viewerUsers.body));
+    const viewerCreate = await apiAs(viewerToken, '/api/contracts', { method: 'POST', body: JSON.stringify({ buyer_phone: '+967700000003', seller_phone: '+967700000004', product_description: 'x', amount: 10 }) });
+    check('user without contracts:create rejected for contract creation (403)', viewerCreate.status === 403, JSON.stringify(viewerCreate.body));
 
     // ---- New: workflow copy, edit/reorder, settle_dispute rejected, delete ----
     const settle = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'bad2', steps: [{ step_type: 'settle_dispute' }] }) });
@@ -130,7 +207,17 @@ server.listen(PORT, async () => {
     check('audit POST refused (GET only)', auditPost.status === 404);
     const audit2 = await api('/api/audit');
     check('audit non-empty after all mutations', audit2.body.length >= 20, String(audit2.body.length));
+
+    // ---- New: primary admin cannot be disabled or deleted ----
+    const meAgain = await api('/api/auth/me');
+    const primaryDisable = await api(`/api/users/${meAgain.body.id}/disable`, { method: 'POST', body: JSON.stringify({}) });
+    check('primary admin cannot be disabled', primaryDisable.status === 400, JSON.stringify(primaryDisable.body));
+    const primaryDelete = await api(`/api/users/${meAgain.body.id}`, { method: 'DELETE' });
+    check('primary admin cannot be deleted', primaryDelete.status === 400, JSON.stringify(primaryDelete.body));
   } catch (e) { failed++; console.log('FAIL exception', e); }
   console.log(`RESULT passed=${passed} failed=${failed}`);
-  server.close(() => process.exit(failed ? 1 : 0));
+  server.close(() => {
+    try { fs.unlinkSync(path.join(__dirname, 'data.json')); } catch {}
+    process.exit(failed ? 1 : 0);
+  });
 });

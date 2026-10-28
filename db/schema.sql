@@ -2,15 +2,31 @@
 -- قواعد ثابتة: سجل التدقيق إلحاقي فقط، الحذف منطقي لا فيزيائي،
 -- لا تأكيد مالي بدون مرجع مؤسسة، ولا عمود رصيد داخلي أبداً.
 
+-- Departments are a fixed enumeration (no separate table, so the schema
+-- keeps its 12 tables): Operations, Finance Coordination, Customer
+-- Support, Administration. The API exposes them at GET /api/departments.
 CREATE TABLE app_users (
   id SERIAL PRIMARY KEY,
   full_name TEXT NOT NULL,
   email TEXT UNIQUE NOT NULL,
+  -- scrypt hash ONLY, format 'scrypt:<salt>:<hash>'. Plaintext passwords
+  -- are never stored, returned, or written to any file.
+  password_hash TEXT,
   role TEXT NOT NULL CHECK (role IN ('owner','ops_supervisor','ops_employee','financial_coordinator','viewer')),
+  department TEXT CHECK (department IN ('Operations','Finance Coordination','Customer Support','Administration')),
+  -- Per-user overrides that restrict/replace the role defaults. An empty
+  -- sections array / empty actions object means "use the role defaults"
+  -- (the API applies the same rule to legacy rows with NULLs).
+  sections JSONB NOT NULL DEFAULT '[]'::jsonb,
+  actions JSONB NOT NULL DEFAULT '{}'::jsonb,
+  is_primary_admin BOOLEAN NOT NULL DEFAULT FALSE,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   deleted_at TIMESTAMPTZ
 );
+-- The primary admin (is_primary_admin) must never be disabled or deleted,
+-- and the only active owner must never be disabled or deleted; both guards
+-- live in the API, not in the schema, because they depend on live counts.
 
 CREATE TABLE contracts (
   id SERIAL PRIMARY KEY,
