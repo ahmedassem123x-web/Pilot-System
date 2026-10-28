@@ -1,0 +1,1 @@
+{"description":"Pilot System standalone backend — no external dependencies, Node built-ins only, so it runs anywhere and can be tested without Docker or Postgres.","engines":{"node":">=20"},"main":"src/server.js","name":"pilot-system-backend","scripts":{"start":"node src/server.js","test":"node src/test.js"},"version":"1.0.0"}

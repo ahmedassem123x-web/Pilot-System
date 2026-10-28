@@ -1,0 +1,27 @@
+{
+  "name": "frontend",
+  "version": "1.0.0",
+  "description": "Pilot System operations frontend (Arabic RTL). Built as one self-contained index.html so the existing backend static route (GET / -> frontend/index.html) can serve it without any backend change.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build && cp dist/dev-entry.html index.html",
+    "dev": "vite",
+    "preview": "vite preview"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@vitejs/plugin-react": "^6.1.2",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "vite": "^8.3.5",
+    "vite-plugin-singlefile": "^2.3.4"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "typescript": "^7.0.2"
+  }
+}
