@@ -124,16 +124,16 @@ export function WorkflowDesigner({ workflows, templates, reload }: { workflows: 
           <div className="phone-body">
             {steps.map((s, i) => <div key={i} className="wa-bubble">
               {s.step_type === 'text' && <span>{s.content || '…رسالة نصية…'}</span>}
-              {s.step_type === 'template' && <span>📋 قالب: {s.template_name || '—'}</span>}
-              {['image', 'video', 'audio', 'document'].includes(s.step_type) && <span>{s.step_type === 'image' ? '🖼️' : s.step_type === 'video' ? '🎬' : s.step_type === 'audio' ? '🎙️' : '📄'} {s.caption || s.media_url || 'وسائط'}</span>}
+              {s.step_type === 'template' && <span>قالب: {s.template_name || '—'}</span>}
+              {['image', 'video', 'audio', 'document'].includes(s.step_type) && <span>{s.step_type === 'image' ? 'صورة' : s.step_type === 'video' ? 'فيديو' : s.step_type === 'audio' ? 'صوتي' : 'مستند'} {s.caption || s.media_url || 'وسائط'}</span>}
               {s.step_type === 'buttons' && <span>{(s.buttons || []).filter(Boolean).map((b2, j) => <span key={j} className="wa-btn">{b2}</span>)}</span>}
               {s.step_type === 'list' && <span>{(s.items || []).filter(Boolean).map((it, j) => <div key={j}>• {it}</div>)}</span>}
-              {['question_text', 'question_number', 'media_request'].includes(s.step_type) && <span>❓ {s.question || 'سؤال للعميل'}</span>}
-              {s.step_type === 'condition' && <span>🔀 شرط: {s.condition_expr || '—'}</span>}
-              {s.step_type === 'action' && <span>⚙️ إجراء: {s.action_text || '—'}</span>}
-              {s.step_type === 'delay' && <span>⏳ انتظار {s.delay_seconds} ثانية</span>}
-              {s.step_type === 'handover' && <span>🙋 تحويل لموظف: {s.handover_note || ''}</span>}
-              {s.step_type === 'end' && <span>🏁 نهاية التدفق</span>}
+              {['question_text', 'question_number', 'media_request'].includes(s.step_type) && <span>{s.question || 'سؤال للعميل'}</span>}
+              {s.step_type === 'condition' && <span>شرط: {s.condition_expr || '—'}</span>}
+              {s.step_type === 'action' && <span>إجراء: {s.action_text || '—'}</span>}
+              {s.step_type === 'delay' && <span>انتظار {s.delay_seconds} ثانية</span>}
+              {s.step_type === 'handover' && <span>تحويل لموظف: {s.handover_note || ''}</span>}
+              {s.step_type === 'end' && <span>نهاية التدفق</span>}
             </div>)}
           </div>
         </div>

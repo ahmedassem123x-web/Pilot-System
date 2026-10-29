@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, local, type AutomationRule, type ChecklistStep, type WhatsAppStatus } from './api';
 import { Badge, Card, Empty, Field, LocalNote, fmt, stateTone } from './components';
+import { IconChat, IconCheckSquare, IconDoc, IconInbox, IconPower, IconTemplate } from './icons';
 import {
   ACTION_AR, CHECKLIST, DEPARTMENTS, ROLE_AR, ROLES, SECTIONS_AR, SECTIONS_LIST, STATE_AR, TEMPLATE_AR, TRANSITIONS,
   type AuditEntry, type Contract, type Conversation, type MeUser, type Message, type State, type Template, type User, type Workflow,
@@ -29,7 +30,7 @@ export interface Bundle {
 export function contractById(b: Bundle, id: number) { return b.contracts.find((c) => c.id === id); }
 
 /* ---------------- Dashboard ---------------- */
-export function Dashboard({ b, reload }: { b: Bundle; reload: () => void }) {
+export function Dashboard({ b, reload, onOpenDesigner }: { b: Bundle; reload: () => void; onOpenDesigner?: () => void }) {
   const openTasks = b.tasks.filter((t) => (local.taskOverrides()[t.id] || t.status) === 'open').length;
   const unread = b.conversations.reduce((s, c) => s + (c.unread_count || 0), 0);
   const byState = useMemo(() => {
@@ -38,15 +39,23 @@ export function Dashboard({ b, reload }: { b: Bundle; reload: () => void }) {
   const latest = [...b.contracts].slice(-5).reverse();
   // Every number below comes from the backend API bundle (b.*) only.
   // When the system starts empty they read 0 — no demo number is ever shown.
+  // 0 is rendered with the same large type, spacing and icon treatment.
   const approvedTemplates = b.templates.filter((t) => t.approval_status === 'approved').length;
   return <>
+    <div className="page-head">
+      <h1>لوحة القيادة</h1>
+      <div className="btn-row">
+        {onOpenDesigner && <button className="btn" onClick={onOpenDesigner}>فتح مصمّم الورك فلو</button>}
+        <span className={`pill ${b.healthOk ? 'ok' : 'danger'}`}><span className="dot" />{b.healthOk ? 'متصل' : 'غير متصل'}</span>
+      </div>
+    </div>
     <div className="stats">
-      <div className="stat"><span className="stat-icon">📄</span><b>{b.contracts.length}</b><span className="stat-label">إجمالي العقود</span><span className="stat-sub">جميع الحالات — من الخادم</span></div>
-      <div className="stat"><span className="stat-icon">💬</span><b>{b.conversations.length}</b><span className="stat-label">محادثات</span><span className="stat-sub">محادثة مستقلة لكل طرف في كل عقد</span></div>
-      <div className="stat"><span className="stat-icon">✉️</span><b>{unread}</b><span className="stat-label">رسائل غير مقروءة</span><span className="stat-sub">{unread === 0 ? 'لا رسائل بانتظار القراءة' : 'بانتظار القراءة والرد'}</span></div>
-      <div className="stat"><span className="stat-icon">✅</span><b>{openTasks}</b><span className="stat-label">مهام مفتوحة</span><span className="stat-sub">مهام تشغيل لم تُنجز بعد</span></div>
-      <div className="stat"><span className="stat-icon">📋</span><b>{approvedTemplates} / {b.templates.length}</b><span className="stat-label">قوالب معتمدة</span><span className="stat-sub">من قوالب واتساب في الخادم</span></div>
-      <div className="stat danger"><span className="stat-icon">⛔</span><b>{b.killSwitch ? 'مُفعّل' : 'متوقف'}</b><span className="stat-label">مفتاح إيقاف الأتمتة</span><span className="stat-sub">{b.killSwitch ? 'الأتمتة موقوفة الآن' : 'الأتمتة تعمل'}</span></div>
+      <div className="stat"><div className="stat-top"><b>{b.contracts.length}</b><span className="stat-icon-box"><IconDoc /></span></div><span className="stat-label">إجمالي العقود</span><span className="stat-sub">جميع الحالات — من الخادم</span></div>
+      <div className="stat"><div className="stat-top"><b>{b.conversations.length}</b><span className="stat-icon-box"><IconChat /></span></div><span className="stat-label">محادثات</span><span className="stat-sub">محادثة مستقلة لكل طرف في كل عقد</span></div>
+      <div className="stat"><div className="stat-top"><b>{unread}</b><span className="stat-icon-box"><IconInbox /></span></div><span className="stat-label">رسائل غير مقروءة</span><span className={`stat-sub ${unread > 0 ? 'attention' : ''}`}>{unread === 0 ? 'لا رسائل بانتظار القراءة' : 'بانتظار القراءة والرد'}</span></div>
+      <div className="stat"><div className="stat-top"><b>{openTasks}</b><span className="stat-icon-box"><IconCheckSquare /></span></div><span className="stat-label">مهام مفتوحة</span><span className={`stat-sub ${openTasks > 0 ? 'attention' : ''}`}>مهام تشغيل لم تُنجز بعد</span></div>
+      <div className="stat"><div className="stat-top"><b>{approvedTemplates} / {b.templates.length}</b><span className="stat-icon-box"><IconTemplate /></span></div><span className="stat-label">قوالب معتمدة</span><span className="stat-sub">من قوالب واتساب في الخادم</span></div>
+      <div className="stat danger"><div className="stat-top"><b>{b.killSwitch ? 'مُفعّل' : 'متوقف'}</b><span className="stat-icon-box"><IconPower /></span></div><span className="stat-label">مفتاح إيقاف الأتمتة</span><span className="stat-sub">{b.killSwitch ? 'الأتمتة موقوفة الآن' : 'الأتمتة تعمل'}</span></div>
     </div>
     <Card title="حالة الخادم" sub="لا تأكيد مالي بدون مرجع مؤسسة، ولا خطوة آلية تلمس المال أبداً." actions={<button className="btn ghost" onClick={reload}>تحديث</button>}>
       <p>الاتصال بالخادم: {b.healthOk ? <Badge tone="ok">متصل</Badge> : <Badge tone="bad">غير متصل</Badge>} — مفتاح الإيقاف: {b.killSwitch ? <Badge tone="bad">الأتمتة موقوفة</Badge> : <Badge tone="ok">الأتمتة تعمل</Badge>}</p>
@@ -64,8 +73,8 @@ export function Dashboard({ b, reload }: { b: Bundle; reload: () => void }) {
     </Card>
     <Card title="أحدث العقود" sub="آخر 5 عقود من الخادم — افتح صفحة العقود لعرض القائمة الكاملة والتفاصيل.">
       {latest.length === 0 ? <Empty text="لا عقود بعد — أنشئ أول عقد من صفحة العقود." /> :
-        <div className="table-wrap"><table><thead><tr><th>العقد</th><th>الطرفان</th><th>الحالة</th><th>المبلغ</th><th>أُنشئ</th></tr></thead>
-        <tbody>{latest.map((c) => <tr key={c.id}><td><b>{c.code}</b><div className="small">{c.product_description}</div></td><td><div className="small">المشتري: {c.buyer_phone}</div><div className="small">البائع: {c.seller_phone}</div></td><td><Badge tone={stateTone(c.state)}>{STATE_AR[c.state]}</Badge></td><td>{c.amount} {c.currency}</td><td className="small">{fmt(c.created_at)}</td></tr>)}</tbody></table></div>}
+        <div className="table-wrap"><table><thead><tr><th>العقد</th><th>المنتج</th><th>المبلغ</th><th>الحالة</th><th>التاريخ</th></tr></thead>
+        <tbody>{latest.map((c) => <tr key={c.id}><td><b>{c.code}</b></td><td>{c.product_description}</td><td>{c.amount} {c.currency}</td><td><Badge tone={stateTone(c.state)}>{STATE_AR[c.state]}</Badge></td><td className="small">{fmt(c.created_at)}</td></tr>)}</tbody></table></div>}
     </Card>
   </>;
 }
@@ -271,7 +280,7 @@ export function Inbox({ b, reload, me, sub }: { b: Bundle; reload: () => void; m
         {(sel.unread_count || 0) > 0 && <button className="btn ghost small" onClick={async () => { try { await api.readConversation(sel.id); setMsg('تم تعيين المحادثة كمقروءة.'); reload(); } catch (err) { setMsg('خطأ: ' + (err as Error).message); } }}>تعيين كمقروءة ({sel.unread_count})</button>}
         <div className="thread">
           {thread.length === 0 ? <Empty text="لا رسائل في هذه المحادثة بعد." /> : thread.map((m) => <div key={m.id} className={`bubble ${m.direction === 'in' ? 'in' : 'out'} ${m.is_internal_note ? 'internal' : ''}`}>
-            <div className="bubble-head">{m.is_internal_note ? '📝 ملاحظة داخلية فقط — لا تُرسل للعميل' : m.direction === 'in' ? 'وارد' : 'صادر'} • {m.sender_name || '—'} {m.template_name ? `• قالب: ${m.template_name}` : ''}</div>
+            <div className="bubble-head">{m.is_internal_note ? 'ملاحظة داخلية فقط — لا تُرسل للعميل' : m.direction === 'in' ? 'وارد' : 'صادر'} • {m.sender_name || '—'} {m.template_name ? `• قالب: ${m.template_name}` : ''}</div>
             <div>{m.body}</div><div className="small">{fmt(m.created_at)}</div>
           </div>)}
         </div>

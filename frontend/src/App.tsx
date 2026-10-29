@@ -6,44 +6,48 @@ import {
 } from './views';
 import { WorkflowDesigner } from './workflow';
 import { ROLE_AR, type MeUser } from './types';
+import {
+  IconBolt, IconChat, IconCheckSquare, IconDoc, IconGrid, IconLink, IconReport,
+  IconSettings, IconShield, IconTemplate, IconUsers, IconWorkflow,
+} from './icons';
 
 type MainTab = 'dashboard' | 'contracts' | 'inbox' | 'whatsapp' | 'automation' | 'users' | 'audit' | 'settings';
 interface Sub { id: string; label: string; section?: string; action?: string; }
-interface NavItem { id: MainTab; label: string; section: string; subs: Sub[]; }
+interface NavItem { id: MainTab; label: string; section: string; icon: (p: { className?: string }) => React.ReactElement; subs: Sub[]; }
 const NAV: NavItem[] = [
-  { id: 'dashboard', label: '📊 لوحة القيادة', section: 'dashboard', subs: [] },
-  { id: 'contracts', label: '📄 العقود', section: 'contracts', subs: [
+  { id: 'dashboard', label: 'لوحة القيادة', section: 'dashboard', icon: IconGrid, subs: [] },
+  { id: 'contracts', label: 'العقود', section: 'contracts', icon: IconDoc, subs: [
     { id: 'list', label: 'قائمة العقود' },
     { id: 'new', label: 'عقد جديد', action: 'create' },
     { id: 'versions', label: 'النسخ' },
     { id: 'tasks', label: 'مهام التشغيل', section: 'tasks' },
   ] },
-  { id: 'inbox', label: '💬 الإنبكس والدردشة', section: 'inbox', subs: [
+  { id: 'inbox', label: 'الإنبكس والدردشة', section: 'inbox', icon: IconChat, subs: [
     { id: 'conversations', label: 'المحادثات' },
     { id: 'chat', label: 'عرض الدردشة' },
     { id: 'assigned', label: 'المعيّنة لي' },
     { id: 'notes', label: 'الملاحظات الداخلية' },
   ] },
-  { id: 'whatsapp', label: '🟢 واتساب', section: 'whatsapp', subs: [
+  { id: 'whatsapp', label: 'واتساب', section: 'whatsapp', icon: IconLink, subs: [
     { id: 'connection', label: 'الربط والتوصيل' },
     { id: 'templates', label: 'القوالب' },
     { id: 'settings', label: 'الإعدادات' },
     { id: 'webhook', label: 'حالة Webhook' },
   ] },
-  { id: 'automation', label: '⚙️ الأتمتة', section: 'automation', subs: [
+  { id: 'automation', label: 'الأتمتة', section: 'automation', icon: IconBolt, subs: [
     { id: 'rules', label: 'القواعد' },
     { id: 'designer', label: 'مصمّم التدفقات' },
     { id: 'killswitch', label: 'مفتاح الإيقاف' },
   ] },
-  { id: 'users', label: '👥 المستخدمون', section: 'users', subs: [
+  { id: 'users', label: 'المستخدمون', section: 'users', icon: IconUsers, subs: [
     { id: 'list', label: 'قائمة المستخدمين' },
     { id: 'add', label: 'إضافة مستخدم' },
     { id: 'passwords', label: 'كلمات السر' },
     { id: 'permissions', label: 'الصلاحيات' },
     { id: 'departments', label: 'الأقسام' },
   ] },
-  { id: 'audit', label: '📜 التدقيق والتقارير', section: 'audit', subs: [] },
-  { id: 'settings', label: '🛠️ إعدادات النظام', section: 'settings', subs: [
+  { id: 'audit', label: 'التدقيق والتقارير', section: 'audit', icon: IconReport, subs: [] },
+  { id: 'settings', label: 'إعدادات النظام', section: 'settings', icon: IconSettings, subs: [
     { id: 'system', label: 'إعدادات النظام' },
     { id: 'checklist', label: 'قائمة الربط (10 خطوات)' },
   ] },
@@ -59,6 +63,34 @@ function parseHash(): { main: MainTab; sub: string } {
   return { main, sub };
 }
 
+// Phone top tabs (Preview list, verbatim) + the two extra pills (audit,
+// system settings) that keep every existing section reachable on phone.
+// Visibility is permission-gated exactly like the sidebar (hasSection).
+interface TopTab { key: string; label: string; icon: (p: { className?: string }) => React.ReactElement; main: MainTab; sub?: string; section: string; }
+const TOP_TABS: TopTab[] = [
+  { key: 'dashboard', label: 'لوحة القيادة', icon: IconGrid, main: 'dashboard', section: 'dashboard' },
+  { key: 'contracts', label: 'العقود والمعاملات', icon: IconDoc, main: 'contracts', sub: 'list', section: 'contracts' },
+  { key: 'inbox', label: 'الإنبكس', icon: IconChat, main: 'inbox', sub: 'conversations', section: 'inbox' },
+  { key: 'tasks', label: 'مهام التشغيل', icon: IconCheckSquare, main: 'contracts', sub: 'tasks', section: 'tasks' },
+  { key: 'designer', label: 'مصمّم الورك فلو', icon: IconWorkflow, main: 'automation', sub: 'designer', section: 'automation' },
+  { key: 'templates', label: 'قوالب واتساب', icon: IconTemplate, main: 'whatsapp', sub: 'templates', section: 'whatsapp' },
+  { key: 'automation', label: 'الأتمتة والتقارير', icon: IconBolt, main: 'automation', sub: 'rules', section: 'automation' },
+  { key: 'audit', label: 'التدقيق', icon: IconReport, main: 'audit', section: 'audit' },
+  { key: 'users', label: 'المستخدمون والأدوار', icon: IconUsers, main: 'users', sub: 'list', section: 'users' },
+  { key: 'linking', label: 'الربط والإعداد', icon: IconLink, main: 'whatsapp', sub: 'connection', section: 'whatsapp' },
+  { key: 'settings', label: 'إعدادات النظام', icon: IconSettings, main: 'settings', sub: 'system', section: 'settings' },
+];
+function activeTopKey(main: MainTab, sub: string): string {
+  if (main === 'contracts' && sub === 'tasks') return 'tasks';
+  if (main === 'contracts') return 'contracts';
+  if (main === 'whatsapp' && sub === 'templates') return 'templates';
+  if (main === 'whatsapp') return 'linking';
+  if (main === 'automation' && sub === 'designer') return 'designer';
+  if (main === 'automation') return 'automation';
+  if (main === 'settings') return 'settings';
+  return main;
+}
+
 export default function App() {
   const [me, setMe] = useState<MeUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
@@ -66,7 +98,6 @@ export default function App() {
   const [loginErr, setLoginErr] = useState('');
   const [loggingIn, setLoggingIn] = useState(false);
   const [{ main, sub }, setNav] = useState(parseHash);
-  const [open, setOpen] = useState(false);
   const [data, setData] = useState<Bundle>(EMPTY);
   const [err, setErr] = useState('');
 
@@ -109,7 +140,6 @@ export default function App() {
     const subId = s || nav.subs[0]?.id || '';
     setNav({ main: m, sub: subId });
     location.hash = subId ? `${m}/${subId}` : m;
-    setOpen(false);
     window.scrollTo(0, 0);
   }
   async function doLogin(e: React.FormEvent) {
@@ -123,14 +153,22 @@ export default function App() {
   }
   function logout() { clearToken(); setMe(null); setData(EMPTY); }
 
+  const brand = (
+    <div className="brand-row">
+      <span className="brand-mark"><IconShield /></span>
+      <span><b className="brand">Pilot System</b><span className="brand-sub">نظام إدارة العقود والمعاملات</span></span>
+    </div>
+  );
+
   if (!authChecked) return <div className="app"><main><p className="muted">جارٍ التحقق من الجلسة…</p></main></div>;
   if (!me) return <div className="app login-wrap" dir="rtl">
-    <header className="topbar">
-      <div><b className="brand">Pilot System</b><span className="brand-sub"> لوحة تشغيل — النسخة المستقلة</span></div>
-    </header>
+    <header className="topbar">{brand}</header>
     <main>
       <section className="card login-card">
-        <div className="login-brand"><b>Pilot System</b><span>لوحة تشغيل فريق العمليات — النسخة المستقلة</span></div>
+        <div className="login-brand">
+          <span className="brand-mark"><IconShield /></span>
+          <span><b>Pilot System</b><span>نظام إدارة العقود والمعاملات</span></span>
+        </div>
         <div className="login-body">
           <h2>تسجيل الدخول</h2>
           <p className="muted">لا يستطيع أحد الدخول إلا بعد أن يضيفه المسؤول. المسؤول الأساسي يُنشأ عند أول تشغيل من متغيرات بيئة الخادم فقط.</p>
@@ -153,9 +191,9 @@ export default function App() {
   const forbidden = !mainAllowed || !subAllowed;
   const unread = data.conversations.reduce((s, c) => s + (c.unread_count || 0), 0);
   const activeSubs = nav.subs.filter((s) => (!s.section || hasSection(me, s.section)) && (!s.action || hasAction(me, nav.section, s.action)));
+  const topKey = activeTopKey(main, sub);
+  const visibleTopTabs = TOP_TABS.filter((t) => hasSection(me, t.section));
 
-  // Sidebar groups are presentation-only: they reorder nothing, hide nothing,
-  // and never bypass hasSection gating (visibleNav is computed the same way).
   const SIDE_GROUPS: { title: string; ids: MainTab[] }[] = [
     { title: 'العمل اليومي', ids: ['dashboard', 'contracts', 'inbox'] },
     { title: 'القنوات والأتمتة', ids: ['whatsapp', 'automation'] },
@@ -163,25 +201,39 @@ export default function App() {
   ];
   return <div className="app">
     <header className="topbar">
-      <button className="burger" onClick={() => setOpen(!open)} aria-label="القائمة" aria-expanded={open}>☰</button>
-      <div><b className="brand">Pilot System</b><span className="brand-sub"> لوحة تشغيل — النسخة المستقلة</span></div>
+      {brand}
       <div className="top-status">
-        {data.killSwitch && <span className="pill danger">⛔ الأتمتة موقوفة</span>}
-        {unread > 0 && <button className="pill" onClick={() => go('inbox', 'conversations')}>💬 {unread} غير مقروءة</button>}
-        <span className={`pill ${data.healthOk ? 'ok' : 'danger'}`}>{data.healthOk ? '● متصل' : '● غير متصل'}</span>
+        {data.killSwitch && <span className="pill danger">الأتمتة موقوفة</span>}
+        {unread > 0 && <button className="pill" onClick={() => go('inbox', 'conversations')}>غير مقروءة: {unread}</button>}
+        <span className={`pill ${data.healthOk ? 'ok' : 'danger'}`}><span className="dot" />{data.healthOk ? 'متصل' : 'غير متصل'}</span>
         <span className="pill">{me.full_name} ({ROLE_AR[me.role]})</span>
         <button className="pill" onClick={logout}>خروج</button>
       </div>
     </header>
+    {/* Phone-only top tab bar (CSS shows it < 820px, hides it >= 820px). */}
+    <nav className="topnav" aria-label="التنقل الرئيسي">
+      {visibleTopTabs.map((t) => {
+        const Icon = t.icon;
+        return <button key={t.key} className={`tab ${topKey === t.key ? 'active' : ''}`} onClick={() => go(t.main, t.sub)}>
+          <Icon />{t.label}{t.key === 'inbox' && unread > 0 && <span className="unread-badge">{unread}</span>}
+        </button>;
+      })}
+    </nav>
     {err && <div className="errbar">{err}</div>}
     <div className="layout">
-      <aside className={`sidebar ${open ? 'open' : ''}`}>
+      {/* Desktop-only sidebar (CSS hides it < 820px). Same gating as top tabs. */}
+      <aside className="sidebar">
         {SIDE_GROUPS.map((g) => {
           const items = visibleNav.filter((n) => g.ids.includes(n.id));
           if (items.length === 0) return null;
           return <div key={g.title} className="side-group">
             <p className="side-group-title">{g.title}</p>
-            {items.map((n) => <button key={n.id} className={`side-link ${main === n.id ? 'active' : ''}`} onClick={() => go(n.id)}>{n.label}{n.id === 'inbox' && unread > 0 ? ` (${unread})` : ''}</button>)}
+            {items.map((n) => {
+              const Icon = n.icon;
+              return <button key={n.id} className={`side-link ${main === n.id ? 'active' : ''}`} onClick={() => go(n.id)}>
+                <Icon />{n.label}{n.id === 'inbox' && unread > 0 && <span className="side-unread">{unread}</span>}
+              </button>;
+            })}
           </div>;
         })}
         <div className="side-guard">
@@ -190,13 +242,12 @@ export default function App() {
           <p>بيانات الربط والمفاتيح في متغيرات بيئة الخادم فقط — لا تُدخل هنا أبداً.</p>
         </div>
       </aside>
-      {open && <div className="backdrop" onClick={() => setOpen(false)} />}
       <main>
         {activeSubs.length > 0 && <div className="btn-row subnav">
           {activeSubs.map((s) => <button key={s.id} className={`btn small ${sub === s.id ? '' : 'ghost'}`} onClick={() => go(main, s.id)}>{s.label}</button>)}
         </div>}
         {forbidden ? <NoPermission /> : <>
-          {main === 'dashboard' && <Dashboard b={data} reload={reload} />}
+          {main === 'dashboard' && <Dashboard b={data} reload={reload} onOpenDesigner={hasSection(me, 'automation') ? () => go('automation', 'designer') : undefined} />}
           {main === 'contracts' && sub === 'versions' && <ContractVersions b={data} />}
           {main === 'contracts' && sub === 'tasks' && <Tasks b={data} reload={reload} />}
           {main === 'contracts' && (sub === 'list' || sub === 'new') && <Contracts b={data} reload={reload} sub={sub as 'list' | 'new'} />}
