@@ -37,3 +37,5 @@ accounts in the client's name, dedicated Cloud API number, official Meta
 Cloud API linking only (never WhatsApp Web QR or unofficial tools),
 Utility templates only, no secrets in code/repo/chat (hosting env vars
 only), append-only audit with the real user as actor.
+- [professional-rebuild-progress.md](professional-rebuild-progress.md) — continuous professional rebuild log (passes, dedupe, chat spec, QA).
+- [provider-study-full.md](provider-study-full.md) — full provider study (Pass 1, when delivered).

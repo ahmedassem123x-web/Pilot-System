@@ -32,9 +32,17 @@ function statusAr(m: Message): string {
   return m.meta_status === 'sent' ? 'أُرسلت' : m.meta_status === 'delivered' ? 'سُلّمت' : m.meta_status === 'read' ? 'قُرئت' : m.meta_status === 'failed' ? 'فشلت' : m.meta_status;
 }
 
+
+function initials(s: string): string { const w = s.replace(/[^\w\u0600-\u06FF ]/g,'').trim().split(/\s+/).filter(Boolean); if (!w.length) return '؟'; return (w[0][0] + (w[1] ? w[1][0] : '')).toUpperCase(); }
+function shortTime(dt?: string | null): string { if (!dt) return ''; const d = new Date(dt); const today = new Date(); const same = d.toDateString() === today.toDateString(); return same ? d.toLocaleTimeString('ar', { hour: '2-digit', minute: '2-digit' }) : d.toLocaleDateString('ar', { day: 'numeric', month: 'numeric' }); }
+function dateLabel(dt: string): string { const d = new Date(dt); const today = new Date(); const y = new Date(); y.setDate(today.getDate()-1); if (d.toDateString()===today.toDateString()) return 'اليوم'; if (d.toDateString()===y.toDateString()) return 'أمس'; return d.toLocaleDateString('ar', { weekday:'long', day:'numeric', month:'long', year:'numeric' }); }
+function ticks(m: Message): string { if (m.direction !== 'out' || m.is_internal_note) return ''; if (m.dry_run) return 'تجريبي'; if (m.meta_status === 'read') return '✓✓ مقروءة'; if (m.meta_status === 'delivered') return '✓✓ سُلّمت'; if (m.meta_status === 'sent') return '✓ أُرسلت'; if (m.meta_status === 'failed') return '✗ فشلت — أعد المحاولة'; return '✓ مسجّلة'; }
+function templateButtons(tpl: Template | undefined): string[] { if (!tpl || !tpl.buttons) return []; if (Array.isArray(tpl.buttons)) return tpl.buttons.map((b: unknown) => typeof b === 'string' ? b : (b as {title?: string; text?: string}).title || (b as {text?: string}).text || '').filter(Boolean); return []; }
+
 export function WhatsAppWorkspace({ b, reload, me }: { b: WorkspaceBundle; reload: () => void; me: MeUser | null }) {
   const [q, setQ] = useState('');
-  const [filter, setFilter] = useState<'all' | 'unread' | 'mine' | 'open' | 'resolved'>('all');
+  const [filter, setFilter] = useState<'all' | 'unread' | 'mine' | 'open' | 'resolved' | 'unassigned'>('all');
+  const [lastUpdated, setLastUpdated] = useState(new Date());
   const [tagFilter, setTagFilter] = useState('');
   const [selId, setSelId] = useState<number | null>(null);
   const [chatQ, setChatQ] = useState('');
@@ -54,19 +62,23 @@ export function WhatsAppWorkspace({ b, reload, me }: { b: WorkspaceBundle; reloa
   const [file, setFile] = useState<File | null>(null);
   const [macroId, setMacroId] = useState<number | ''>('');
   const [tagsInput, setTagsInput] = useState('');
+  const [replyToId, setReplyToId] = useState<number | null>(null);
+  const [jumpId, setJumpId] = useState<number | null>(null);
 
   useEffect(() => {
     api.quickReplies().then(setQuickReplies).catch(() => setQuickReplies([]));
     api.macros().then(setMacros).catch(() => setMacros([]));
     api.whatsappUploads().then(setUploads).catch(() => setUploads([]));
   }, []);
+  useEffect(() => { setLastUpdated(new Date()); }, [b.conversations, b.messages]);
   const isMine = (c: Conversation) => !!me && (c.assigned_to === me.full_name || c.assigned_to === me.email || c.assigned_to === String(me.id));
   const allTags = useMemo(() => [...new Set(b.conversations.flatMap((c) => c.labels || []))], [b.conversations]);
-  const list = b.conversations.filter((c) => {
+  const list = [...b.conversations].sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned)).filter((c) => {
     if (filter === 'unread' && !(c.unread_count || 0)) return false;
     if (filter === 'mine' && !isMine(c)) return false;
     if (filter === 'open' && !['new', 'open', 'pending'].includes(c.status)) return false;
     if (filter === 'resolved' && c.status !== 'resolved') return false;
+    if (filter === 'unassigned' && c.assigned_to) return false;
     if (tagFilter && !(c.labels || []).includes(tagFilter)) return false;
     if (q.trim()) {
       const hay = `${nameOf(b, c)} ${phoneOf(b, c)} ${c.assigned_to || ''} ${(c.labels || []).join(' ')}`.toLowerCase();
@@ -98,7 +110,8 @@ export function WhatsAppWorkspace({ b, reload, me }: { b: WorkspaceBundle; reloa
     try {
       if (internal) {
         if (!body.trim()) { setMsg('اكتب نص الملاحظة الداخلية أولاً.'); return; }
-        await api.sendMessage({ conversation_id: sel.id, direction: 'out', sender_name: me?.full_name || 'operator', body: body.trim(), is_internal_note: true });
+        await api.sendMessage({ conversation_id: sel.id, direction: 'out', sender_name: me?.full_name || 'operator', body: body.trim(), is_internal_note: true, reply_to_id: replyToId });
+        setReplyToId(null);
         setMsg('تم حفظ الملاحظة الداخلية — لم تُرسل للعميل أبداً.'); setBody(''); setInternal(false); reload(); return;
       }
       if (mode === 'media') {
@@ -138,11 +151,11 @@ export function WhatsAppWorkspace({ b, reload, me }: { b: WorkspaceBundle; reloa
 
   const selContract = sel ? contractOf(b, sel.contract_id) : null;
   return <div className="wa-workspace">
-    <Card title="مساحة عمل واتساب" sub={`الإنبكس الواحد — ${b.conversations.length} محادثة، ${unreadTotal} غير مقروءة. محادثة واحدة لكل جهة وعقد، ومحادثة عامة للرسائل غير المرتبطة بعقد. لا يُنشأ عقد تلقائياً من رسالة أبداً.`} actions={<button className="btn ghost small" onClick={reload}>تحديث</button>}>
+    <Card title="مساحة عمل واتساب" sub={`الإنبكس الواحد — ${b.conversations.length} محادثة، ${unreadTotal} غير مقروءة. آخر تحديث: ${lastUpdated.toLocaleTimeString('ar')}. محادثة واحدة لكل جهة وعقد، ومحادثة عامة للرسائل غير المرتبطة بعقد. لا يُنشأ عقد تلقائياً من رسالة أبداً.`} actions={<button className="btn ghost small" onClick={reload}>تحديث</button>}>
       <div className="btn-row">
         <input className="inline-input" placeholder="بحث: اسم عقد، رقم، منتج، مكلَّف به، وسم" value={q} onChange={(e) => setQ(e.target.value)} />
         <select className="inline-select" value={filter} onChange={(e) => setFilter(e.target.value as typeof filter)}>
-          <option value="all">كل المحادثات</option><option value="unread">غير مقروءة</option><option value="mine">المعيّنة لي</option><option value="open">المفتوحة</option><option value="resolved">المحلولة</option>
+          <option value="all">كل المحادثات</option><option value="unread">غير مقروءة</option><option value="mine">المعيّنة لي</option><option value="unassigned">غير معيّنة</option><option value="open">المفتوحة</option><option value="resolved">المحلولة</option>
         </select>
         <select className="inline-select" value={tagFilter} onChange={(e) => setTagFilter(e.target.value)}>
           <option value="">كل الوسوم</option>{allTags.map((t) => <option key={t} value={t}>{t}</option>)}
@@ -155,10 +168,9 @@ export function WhatsAppWorkspace({ b, reload, me }: { b: WorkspaceBundle; reloa
         {list.length === 0 ? <Empty text="لا محادثات مطابقة للبحث أو التصفية الحالية." /> :
           <ul className="conv-list">{list.map((c) => {
             const contract = contractOf(b, c.contract_id);
+            const lm = [...b.messages].filter((m) => m.conversation_id === c.id && !m.is_internal_note).sort((x, y) => x.id - y.id).pop();
             return <li key={c.id} className={selId === c.id ? 'sel' : ''} onClick={() => { setSelId(c.id); setDrawerOpen(false); setChatQ(''); setTagsInput((c.labels || []).join(', ')); }}>
-              <div><b>{contract?.code || `عقد ${c.contract_id}`}</b> — {c.party === 'buyer' ? 'المشتري' : c.party === 'seller' ? 'البائع' : 'عام'} <span className="muted">({c.status})</span></div>
-              <div className="small">{contract?.product_description || phoneOf(b, c)} {c.assigned_to ? `• مكلَّف به: ${c.assigned_to}` : ''} {(c.labels || []).length ? `• وسوم: ${(c.labels || []).join('، ')}` : ''}</div>
-              {(c.unread_count || 0) > 0 && <span className="unread">{c.unread_count} غير مقروءة</span>}
+              <div className="wa-list-row"><span className="wa-avatar">{initials(nameOf(b, c))}</span><span className="wa-list-main"><span className="wa-list-top"><b>{c.pinned ? '[مثبتة] ' : ''}{contract?.code || `عقد ${c.contract_id}`}</b><span className="small">{shortTime(lm?.created_at)}</span></span><span className="wa-list-sub">{c.party === 'buyer' ? 'المشتري' : c.party === 'seller' ? 'البائع' : 'عام'} • {lm ? (lm.template_name ? `قالب: ${lm.template_name}` : `${lm.direction === 'out' ? (ticks(lm) ? ticks(lm).split(' ')[0] + ' ' : '') : ''}${(lm.body || '').slice(0, 60)}`) : (contract?.product_description || phoneOf(b, c))}</span><span className="small">{c.assigned_to ? `مكلَّف به: ${c.assigned_to} ` : ''}{(c.labels || []).join('، ')}</span></span>{(c.unread_count || 0) > 0 && <span className="unread">{c.unread_count}</span>}</div>
             </li>;
           })}</ul>}
       </section>
@@ -169,6 +181,7 @@ export function WhatsAppWorkspace({ b, reload, me }: { b: WorkspaceBundle; reloa
               <p className="muted">الرقم: {phoneOf(b, sel) || '—'} • {windowOpen ? <Badge tone="ok">نافذة 24 ساعة مفتوحة</Badge> : <Badge tone="warn">خارج نافذة 24 ساعة — قالب فقط</Badge>} {sel.assigned_to ? `• مكلَّف به: ${sel.assigned_to}` : ''} {selContract ? `• عقد مرتبط: ${selContract.code} (${selContract.state})` : '• بلا عقد مرتبط'}</p>
             </div>
             <div className="btn-row">
+              <button className="btn small ghost" onClick={async () => { try { await api.pinConversation(sel.id); setMsg(sel.pinned ? 'تم إلغاء تثبيت المحادثة.' : 'تم تثبيت المحادثة أعلى القائمة.'); reload(); } catch (err) { setMsg('خطأ: ' + (err as Error).message); } }}>{sel.pinned ? 'إلغاء التثبيت' : 'تثبيت المحادثة'}</button>
               <button className="btn small ghost" onClick={openDrawer}>درج جهة الاتصال</button>
               <button className="btn small ghost" onClick={async () => { setShowLogs(!showLogs); if (!showLogs) setLogs(await api.automationLogs(sel.id).catch(() => [])); }}>{showLogs ? 'إخفاء سجل الأتمتة' : 'سجل تنفيذ الأتمتة'}</button>
             </div>
@@ -192,11 +205,14 @@ export function WhatsAppWorkspace({ b, reload, me }: { b: WorkspaceBundle; reloa
           {showLogs && (logs.length === 0 ? <Empty text="لا سجل تنفيذ أتمتة لهذه المحادثة بعد." /> :
             <table><thead><tr><th>التدفق</th><th>النتيجة</th><th>الوقت</th></tr></thead><tbody>{logs.slice(-20).reverse().map((x) => <tr key={x.id}><td>{x.workflow_name || '—'}</td><td>{x.outcome}</td><td className="small">{fmt(x.created_at)}</td></tr>)}</tbody></table>)}
           <div className="thread">
-            {shownThread.length === 0 ? <Empty text={thread.length === 0 ? 'لا رسائل في هذه المحادثة بعد.' : 'لا رسائل مطابقة للبحث داخل المحادثة.'} /> : shownThread.map((m) => <div key={m.id} className={`bubble ${m.direction === 'in' ? 'in' : 'out'} ${m.is_internal_note ? 'internal' : ''}`}>
+            {shownThread.length === 0 ? <Empty text={thread.length === 0 ? 'لا رسائل في هذه المحادثة بعد.' : 'لا رسائل مطابقة للبحث داخل المحادثة.'} /> : (() => { const groups: { label: string; items: Message[] }[] = []; shownThread.forEach((m) => { const lb = dateLabel(m.created_at); const g = groups.find((x) => x.label === lb); if (g) g.items.push(m); else groups.push({ label: lb, items: [m] }); }); return <>{groups.map((g) => <div key={g.label}><div className="wa-date-sep"><span>{g.label}</span></div>{g.items.map((m) => { const qm = m.reply_to_id ? thread.find((x) => x.id === m.reply_to_id) : null; const tpl = m.template_name ? b.templates.find((x) => x.name === m.template_name) : undefined; return <div key={m.id} id={`msg-${m.id}`} className={`bubble ${m.direction === 'in' ? 'in' : 'out'} ${m.is_internal_note ? 'internal' : ''} ${jumpId === m.id ? 'jump' : ''}`}>
               <div className="bubble-head">{m.is_internal_note ? 'ملاحظة داخلية فقط — لا تُرسل للعميل' : m.direction === 'in' ? 'وارد' : 'صادر'} • {m.sender_name || '—'} {m.template_name ? `• قالب: ${m.template_name}` : ''} {m.media_type ? `• وسائط: ${m.media_type}` : ''}</div>
-              <div>{m.body || (m.template_name ? `قالب: ${m.template_name}` : '—')}</div>
-              <div className="small">{fmt(m.created_at)} • {statusAr(m)}</div>
-            </div>)}
+              {qm && <div className="wa-quote">رد على: {(qm.body || qm.template_name || '').slice(0, 80)}</div>}
+              {m.media_type ? <div className="wa-media">{m.media_type === 'image' ? 'صورة' : m.media_type === 'video' ? 'فيديو' : m.media_type === 'audio' ? 'رسالة صوتية' : 'مستند'} • {m.media_filename || m.body || 'ملف وسائط'}{m.media_caption ? ` — ${m.media_caption}` : ''}</div> : <div>{m.body || (m.template_name ? `قالب: ${m.template_name}` : '—')}</div>}
+              {tpl && <div className="wa-tpl">{tpl.header_text ? <div><b>{tpl.header_text}</b></div> : null}<div>{tpl.body || ''}</div>{tpl.footer ? <div className="small">{tpl.footer}</div> : null}<div className="wa-chips">{templateButtons(tpl).map((bt) => <span key={bt} className="wa-chip">{bt}</span>)}</div></div>}
+              <div className="small wa-meta">{fmt(m.created_at)} • {statusAr(m)} {ticks(m) ? `• ${ticks(m)}` : ''}</div>
+              <div className="btn-row wa-msg-actions"><button className="btn small ghost" onClick={() => setReplyToId(m.id)}>رد مقتبس</button>{chatQ.trim() && <button className="btn small ghost" onClick={() => { setJumpId(m.id); document.getElementById(`msg-${m.id}`)?.scrollIntoView({ block: 'center' }); }}>القفز إلى الرسالة</button>}</div>
+            </div>; })}</div>)}</>; })()}
           </div>
           <div className="wa-composer">
             <div className="btn-row">
@@ -205,6 +221,7 @@ export function WhatsAppWorkspace({ b, reload, me }: { b: WorkspaceBundle; reloa
               <button className={`btn small ${mode === 'media' ? '' : 'ghost'}`} onClick={() => setMode('media')}>وسائط</button>
               <label className="check"><input type="checkbox" checked={internal} onChange={(e) => setInternal(e.target.checked)} /> ملاحظة داخلية فقط (لا تُرسل أبداً)</label>
             </div>
+            {replyToId && <p className="wa-quote">رد مقتبس على رسالة #{replyToId} — {(thread.find((x) => x.id === replyToId)?.body || thread.find((x) => x.id === replyToId)?.template_name || '').slice(0, 80)} <button className="btn small ghost" onClick={() => setReplyToId(null)}>إلغاء الاقتباس</button></p>}
             {!windowOpen && !internal && <p className="local-note">خارج نافذة 24 ساعة: النص الحر والوسائط والأزرار مرفوضة — أرسل قالباً معتمداً فقط.</p>}
             {mode === 'template' && <Field label="القالب (من مكتبة القوالب الواحدة)"><select value={template} onChange={(e) => setTemplate(e.target.value)}><option value="">— اختر قالباً —</option>{b.templates.map((t) => <option key={t.id} value={t.name}>{t.name} ({TEMPLATE_AR[t.name] || t.name}) — محلي: {t.approval_status}، Meta: {t.meta_status || '—'}</option>)}</select></Field>}
             {mode === 'media' && <Field label="ملف (حتى 16 ميجابايت — صورة/فيديو/صوت/مستند)"><input type="file" onChange={(e) => setFile(e.target.files?.[0] || null)} /></Field>}

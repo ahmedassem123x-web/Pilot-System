@@ -733,6 +733,25 @@ server.listen(PORT, async () => {
     const ctMod = require('./contracts.js');
     check('unified backend module: 12 states + transition guard', ctMod.STATES.length === 12 && ctMod.canTransition('draft', 'issued') === true && ctMod.canTransition('draft', 'completed') === false);
 
+
+    // Professional rebuild Pass 2: reply/quote, chat search, assignment.
+    const baseMsg = await api('/api/messages', { method: 'POST', body: JSON.stringify({ conversation_id: anyConv.id, direction: 'in', sender_name: 'عميل', body: 'رسالة أصلية للاقتباس', is_internal_note: false }) });
+    check('pro reply: base message stored', baseMsg.status === 201 && baseMsg.body.id, JSON.stringify(baseMsg.body));
+    const quoted = await api('/api/messages', { method: 'POST', body: JSON.stringify({ conversation_id: anyConv.id, direction: 'out', sender_name: 'موظف', body: 'رد مقتبس عليها', is_internal_note: false, reply_to_id: baseMsg.body.id }) });
+    check('pro reply: reply_to_id stored', quoted.status === 201 && quoted.body.reply_to_id === baseMsg.body.id, JSON.stringify(quoted.body));
+    const searchMsg = await api('/api/messages?q=' + encodeURIComponent('للاقتباس'));
+    check('pro chat search finds quoted thread', searchMsg.status === 200 && searchMsg.body.some((m) => m.id === baseMsg.body.id), JSON.stringify(searchMsg.body.map((m) => m.id)));
+    const assign2 = await api(`/api/conversations/${anyConv.id}/assign`, { method: 'POST', body: JSON.stringify({ assigned_to: 'موظف اختبار' }) });
+    check('pro assignment updates conversation', assign2.status === 200 && assign2.body.assigned_to === 'موظف اختبار', JSON.stringify(assign2.body));
+    const unreadAfter = await api('/api/conversations');
+    check('pro unread counts remain numeric after assignment', unreadAfter.status === 200 && unreadAfter.body.every((c) => typeof c.unread_count === 'number'));
+
+
+    const pin1 = await api(`/api/conversations/${anyConv.id}/pin`, { method: 'POST' });
+    check('pro pin conversation toggles on', pin1.status === 200 && pin1.body.pinned === true, JSON.stringify(pin1.body));
+    const pin2 = await api(`/api/conversations/${anyConv.id}/pin`, { method: 'POST' });
+    check('pro pin conversation toggles off', pin2.status === 200 && pin2.body.pinned !== true, JSON.stringify(pin2.body));
+
     mockServer.close();
 
   } catch (e) { failed++; console.log('FAIL exception', e); }

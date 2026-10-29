@@ -53,13 +53,13 @@ export interface Contract {
   delivery_point: string | null; state: State; clause_fingerprint: string;
   created_at: string; version?: number;
 }
-export interface Conversation { id: number; contract_id: number | null; party: string; phone?: string | null; status: string; unread_count: number; assigned_to?: string | null; labels?: string[]; last_inbound_at?: string | null; }
+export interface Conversation { id: number; contract_id: number | null; party: string; phone?: string | null; status: string; unread_count: number; assigned_to?: string | null; labels?: string[]; last_inbound_at?: string | null; pinned?: boolean; }
 export interface Message {
   id: number; conversation_id: number | null; direction: string;
   sender_name?: string; body: string | null; template_name: string | null;
   is_internal_note: boolean; created_at: string;
   meta_status?: string | null; media_type?: string | null; media_id?: string | null;
-  wamid?: string | null; dry_run?: boolean;
+  wamid?: string | null; dry_run?: boolean; reply_to_id?: number | null; media_caption?: string | null; media_filename?: string | null;
 }
 export interface QuickReply { id: number; shortcut: string; body: string; created_at: string; }
 export interface LinkingPayload {

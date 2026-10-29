@@ -181,12 +181,14 @@ export const api = {
   conversations: () => req<Conversation[]>('/api/conversations'),
   assignConversation: (id: number, assigned_to: string) =>
     req<Conversation>(`/api/conversations/${id}/assign`, { method: 'POST', body: JSON.stringify({ assigned_to }) }),
+  pinConversation: (id: number) =>
+    req<Conversation>(`/api/conversations/${id}/pin`, { method: 'POST' }),
   readConversation: (id: number) =>
     req<Conversation>(`/api/conversations/${id}/read`, { method: 'POST' }),
   replyConversation: (id: number, b: { body?: string; template_name?: string | null; is_internal_note?: boolean; sender_name?: string }) =>
     req<Message>(`/api/conversations/${id}/reply`, { method: 'POST', body: JSON.stringify(b) }),
   messages: () => req<Message[]>('/api/messages'),
-  sendMessage: (b: { conversation_id: number; direction: string; sender_name: string; body: string; template_name?: string | null; is_internal_note: boolean }) =>
+  sendMessage: (b: { conversation_id: number; direction: string; sender_name: string; body: string; template_name?: string | null; is_internal_note: boolean; reply_to_id?: number | null }) =>
     req<Message>('/api/messages', { method: 'POST', body: JSON.stringify(b) }),
   tasks: () => req<Task[]>('/api/tasks'),
   taskAction: (id: number, action: 'complete' | 'cancel') =>

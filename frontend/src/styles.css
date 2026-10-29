@@ -251,3 +251,28 @@ code{word-break:break-all;background:#f1f5f9;padding:2px 6px;border-radius:5px;f
   .stat b{font-size:34px}
   .phone{height:480px}
 }
+
+/* ---- Professional rebuild Pass 2: WhatsApp-Web-standard chat display ---- */
+.wa-list-row{display:flex;gap:10px;align-items:flex-start}
+.wa-avatar{width:44px;height:44px;flex-shrink:0;border-radius:50%;background:var(--teal);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px}
+.wa-list-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.wa-list-top{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.wa-list-sub{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted);font-size:13px}
+.wa-date-sep{display:flex;justify-content:center;margin:16px 0 6px}
+.wa-date-sep span{background:#e2e8f0;color:#334155;border-radius:99px;padding:3px 14px;font-size:12px;font-weight:700}
+.bubble.jump{outline:3px solid rgba(20,184,166,.45)}
+.bubble.out{border-bottom-left-radius:16px;border-bottom-right-radius:4px}
+.bubble.in{border-bottom-right-radius:16px;border-bottom-left-radius:4px}
+.wa-meta{margin-top:6px}
+.wa-quote{background:rgba(15,118,110,.08);border-inline-start:4px solid var(--teal);border-radius:8px;padding:8px 10px;font-size:13px;margin-bottom:8px}
+.wa-media{background:rgba(255,255,255,.6);border:1px solid var(--line-soft);border-radius:10px;padding:10px;font-weight:700}
+.wa-tpl{margin-top:8px}
+.wa-chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.wa-chip{background:var(--teal-soft);color:var(--teal-dark);border:1px solid var(--teal-mist);border-radius:99px;padding:6px 12px;font-size:13px;font-weight:700}
+.wa-msg-actions{margin:6px 0 0}
+.wa-msg-actions .btn{min-height:36px}
+@media(max-width:819px){
+  .wa-workspace .btn, .wa-workspace .btn-row button{min-height:44px}
+  .bubble{max-width:92%}
+  .wa-avatar{width:40px;height:40px}
+}

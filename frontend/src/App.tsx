@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, clearToken, getToken, setToken } from './api';
 import {
-  Audit, Automation, Checklist, Contacts, ContractVersions, Contracts, Dashboard, Inbox, NoPermission,
+  Audit, Automation, Contacts, ContractVersions, Contracts, Dashboard, Inbox, NoPermission,
   SystemSettings, Tasks, Templates, Users, WhatsApp, WhatsAppMedia, hasAction, hasSection, type Bundle,
 } from './views';
 import { WorkflowDesigner } from './workflow';
@@ -28,16 +28,12 @@ const NAV: NavItem[] = [
     { id: 'assigned', label: 'المعيّنة لي' },
     { id: 'notes', label: 'الملاحظات الداخلية' },
   ] },
-  // Stage C: WhatsApp is divided into 7 sub-interfaces (no duplication:
-  // Embedded Signup + wizard live only in connection, templates only in
-  // templates, upload only in media, contacts only in contacts). The inbox
-  // and automation subs REUSE the existing Inbox/Automation components and
-  // additionally require their own section (dual gating, see below).
+  // Professional hierarchy (Pass 3): ONE entry per screen. Inbox lives only
+  // under the Inbox tab, Automation only under Automation, linking only
+  // under WhatsApp > connection. WhatsApp subs are only what WhatsApp owns.
   { id: 'whatsapp', label: 'واتساب', section: 'whatsapp', icon: IconLink, subs: [
     { id: 'connection', label: 'الربط والحسابات' },
-    { id: 'inbox', label: 'الإنبكس', section: 'inbox' }, // same single WhatsAppWorkspace component as the main Inbox tab — not a second inbox
     { id: 'templates', label: 'القوالب' },
-    { id: 'automation', label: 'الأتمتة', section: 'automation' },
     { id: 'contacts', label: 'جهات الاتصال' },
     { id: 'media', label: 'الوسائط' },
     { id: 'settings', label: 'الإعدادات' },
@@ -57,7 +53,6 @@ const NAV: NavItem[] = [
   { id: 'audit', label: 'التدقيق والتقارير', section: 'audit', icon: IconReport, subs: [] },
   { id: 'settings', label: 'إعدادات النظام', section: 'settings', icon: IconSettings, subs: [
     { id: 'system', label: 'إعدادات النظام' },
-    { id: 'checklist', label: 'معالج الربط (7 خطوات)' },
   ] },
 ];
 const EMPTY: Bundle = { contracts: [], conversations: [], messages: [], tasks: [], workflows: [], templates: [], users: [], audit: [], killSwitch: false, healthOk: false };
@@ -96,8 +91,6 @@ function activeTopKey(main: MainTab, sub: string): string {
   if (main === 'whatsapp' && sub === 'templates') return 'templates';
   if (main === 'whatsapp' && sub === 'contacts') return 'contacts';
   if (main === 'whatsapp' && sub === 'media') return 'media';
-  if (main === 'whatsapp' && sub === 'inbox') return 'inbox';
-  if (main === 'whatsapp' && sub === 'automation') return 'automation';
   if (main === 'whatsapp') return 'linking';
   if (main === 'automation' && sub === 'designer') return 'designer';
   if (main === 'automation') return 'automation';
@@ -267,8 +260,6 @@ export default function App() {
           {main === 'contracts' && (sub === 'list' || sub === 'new') && <Contracts b={data} reload={reload} sub={sub as 'list' | 'new'} />}
           {main === 'inbox' && <Inbox b={data} reload={reload} me={me} sub={sub as 'conversations' | 'chat' | 'assigned' | 'notes'} />}
           {main === 'whatsapp' && sub === 'templates' && <Templates b={data} reload={reload} canEdit={hasAction(me, 'whatsapp', 'edit')} />}
-          {main === 'whatsapp' && sub === 'inbox' && <Inbox b={data} reload={reload} me={me} />}
-          {main === 'whatsapp' && sub === 'automation' && <Automation b={data} reload={reload} />}
           {main === 'whatsapp' && sub === 'contacts' && <Contacts b={data} reload={reload} me={me} />}
           {main === 'whatsapp' && sub === 'media' && <WhatsAppMedia b={data} reload={reload} me={me} />}
           {main === 'whatsapp' && (sub === 'connection' || sub === 'settings') && <WhatsApp b={data} reload={reload} me={me} sub={sub as 'connection' | 'settings'} />}
@@ -278,7 +269,6 @@ export default function App() {
           {main === 'users' && <Users b={data} reload={reload} me={me} sub={sub as 'list' | 'add' | 'passwords' | 'permissions' | 'departments'} />}
           {main === 'audit' && <Audit b={data} />}
           {main === 'settings' && sub === 'system' && <SystemSettings />}
-          {main === 'settings' && sub === 'checklist' && <Checklist />}
         </>}
       </main>
     </div>

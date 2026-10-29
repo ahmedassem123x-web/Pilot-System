@@ -1702,13 +1702,20 @@ const server = http.createServer(async (req, res) => {
       if (!conv) return send(res, 404, { error: 'conversation not found' }, p);
       conv.unread_count = 0; audit(actor, 'conversation', conv.id, 'marked_read'); save(); return send(res, 200, conv, p);
     }
+    const convPinMatch = p.match(/^\/api\/conversations\/(\d+)\/pin$/);
+    if (convPinMatch && req.method === 'POST') {
+      if (!can(user, 'inbox', 'edit')) return forbidden();
+      const conv = db.conversations.find((x) => x.id === Number(convPinMatch[1]));
+      if (!conv) return send(res, 404, { error: 'conversation not found' }, p);
+      conv.pinned = !conv.pinned; audit(actor, 'conversation', conv.id, conv.pinned ? 'pinned' : 'unpinned'); save(); return send(res, 200, conv, p);
+    }
     const convReplyMatch = p.match(/^\/api\/conversations\/(\d+)\/reply$/);
     if (convReplyMatch && req.method === 'POST') {
       if (!can(user, 'inbox', 'create')) return forbidden();
       const conv = db.conversations.find((x) => x.id === Number(convReplyMatch[1]));
       if (!conv) return send(res, 404, { error: 'conversation not found' }, p);
       if (!body.body && !body.template_name) return send(res, 400, { error: 'body or template_name is required for a reply' }, p);
-      const m = { id: nextId(), conversation_id: conv.id, direction: 'out', sender_name: body.sender_name || actor, body: body.body || null, template_name: body.template_name || null, is_internal_note: !!body.is_internal_note, created_at: new Date().toISOString() };
+      const m = { id: nextId(), conversation_id: conv.id, direction: 'out', sender_name: body.sender_name || actor, body: body.body || null, template_name: body.template_name || null, is_internal_note: !!body.is_internal_note, reply_to_id: body.reply_to_id || null, created_at: new Date().toISOString() };
       db.messages.push(m); audit(actor, 'message', m.id, 'sent'); return send(res, 201, m, p);
     }
     const customerMessagesMatch = p.match(/^\/api\/customer\/conversations\/(\d+)\/messages$/);
@@ -1732,7 +1739,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/messages' && req.method === 'POST') {
       if (!can(user, 'inbox', 'create')) return forbidden();
       if (!body.body && !body.template_name) return send(res, 400, { error: 'body or template_name is required' }, p);
-      const m = { id: nextId(), conversation_id: body.conversation_id || null, direction: body.direction || 'out', sender_name: body.sender_name || actor, body: body.body || null, template_name: body.template_name || null, is_internal_note: !!body.is_internal_note, created_at: new Date().toISOString() };
+      const m = { id: nextId(), conversation_id: body.conversation_id || null, direction: body.direction || 'out', sender_name: body.sender_name || actor, body: body.body || null, template_name: body.template_name || null, is_internal_note: !!body.is_internal_note, reply_to_id: body.reply_to_id || null, created_at: new Date().toISOString() };
       db.messages.push(m);
       if (m.direction === 'in' && !m.is_internal_note && m.conversation_id) bumpUnread(m.conversation_id);
       audit(actor, 'message', m.id, 'sent'); return send(res, 201, m, p);
