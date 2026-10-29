@@ -184,3 +184,41 @@ CREATE TABLE audit_log (
 --   ALTER TABLE conversations ADD COLUMN IF NOT EXISTS phone TEXT;
 --   ALTER TABLE conversations ADD COLUMN IF NOT EXISTS last_inbound_at TIMESTAMPTZ;
 -- =====================================================================
+-- Stage C (ADDITIVE ONLY, commented — apply at Postgres switch-on):
+-- Contacts are a staff-curated address book, NOT an audience table.
+-- There is no broadcast/campaign table and none must be added: contacts
+-- exist only to look up the conversations/contracts that already exist
+-- for a phone. Roles, last-contact time and Utility eligibility are
+-- DERIVED at read time (from contracts, conversations and messages),
+-- never stored as staff claims: a contact is Utility-eligible only with
+-- a prior inbound message or an outbound template message actually sent
+-- via Meta (dry_run false, wamid present). One row per phone (unique
+-- index on the normalised phone); labels are a plain text array used as
+-- segments. Deleting a contact deletes only the address-book row —
+-- never its contracts, conversations or messages.
+--   CREATE TABLE IF NOT EXISTS contacts (
+--     id SERIAL PRIMARY KEY,
+--     name TEXT NOT NULL,
+--     phone TEXT NOT NULL,
+--     labels TEXT[] NOT NULL DEFAULT '{}',
+--     notes TEXT,
+--     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+--   );
+--   CREATE UNIQUE INDEX IF NOT EXISTS contacts_phone_key
+--     ON contacts (regexp_replace(phone, '[^0-9]', '', 'g'));
+--   -- Uploaded-file records (Stage B/C media library) for the JSON store's
+--   -- db.uploads collection; file BYTES stay on disk, never in the DB:
+--   CREATE TABLE IF NOT EXISTS whatsapp_uploads (
+--     id SERIAL PRIMARY KEY,
+--     filename TEXT NOT NULL,
+--     stored_filename TEXT NOT NULL,
+--     mime_type TEXT NOT NULL,
+--     kind TEXT NOT NULL CHECK (kind IN ('image','video','audio','document')),
+--     size_bytes INTEGER NOT NULL CHECK (size_bytes <= 16777216),
+--     media_id TEXT,
+--     conversation_id INTEGER REFERENCES conversations(id),
+--     uploaded_by TEXT NOT NULL,
+--     dry_run BOOLEAN NOT NULL DEFAULT FALSE,
+--     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+--   );
+-- =====================================================================

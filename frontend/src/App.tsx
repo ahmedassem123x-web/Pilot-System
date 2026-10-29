@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, clearToken, getToken, setToken } from './api';
 import {
-  Audit, Automation, Checklist, ContractVersions, Contracts, Dashboard, Inbox, NoPermission,
-  SystemSettings, Tasks, Templates, Users, WhatsApp, hasAction, hasSection, type Bundle,
+  Audit, Automation, Checklist, Contacts, ContractVersions, Contracts, Dashboard, Inbox, NoPermission,
+  SystemSettings, Tasks, Templates, Users, WhatsApp, WhatsAppMedia, hasAction, hasSection, type Bundle,
 } from './views';
 import { WorkflowDesigner } from './workflow';
 import { ROLE_AR, type MeUser } from './types';
@@ -28,11 +28,19 @@ const NAV: NavItem[] = [
     { id: 'assigned', label: 'المعيّنة لي' },
     { id: 'notes', label: 'الملاحظات الداخلية' },
   ] },
+  // Stage C: WhatsApp is divided into 7 sub-interfaces (no duplication:
+  // Embedded Signup + wizard live only in connection, templates only in
+  // templates, upload only in media, contacts only in contacts). The inbox
+  // and automation subs REUSE the existing Inbox/Automation components and
+  // additionally require their own section (dual gating, see below).
   { id: 'whatsapp', label: 'واتساب', section: 'whatsapp', icon: IconLink, subs: [
-    { id: 'connection', label: 'الربط والتوصيل' },
+    { id: 'connection', label: 'الربط والحسابات' },
+    { id: 'inbox', label: 'الإنبكس', section: 'inbox' },
     { id: 'templates', label: 'القوالب' },
+    { id: 'automation', label: 'الأتمتة', section: 'automation' },
+    { id: 'contacts', label: 'جهات الاتصال' },
+    { id: 'media', label: 'الوسائط' },
     { id: 'settings', label: 'الإعدادات' },
-    { id: 'webhook', label: 'حالة Webhook' },
   ] },
   { id: 'automation', label: 'الأتمتة', section: 'automation', icon: IconBolt, subs: [
     { id: 'rules', label: 'القواعد' },
@@ -74,6 +82,8 @@ const TOP_TABS: TopTab[] = [
   { key: 'tasks', label: 'مهام التشغيل', icon: IconCheckSquare, main: 'contracts', sub: 'tasks', section: 'tasks' },
   { key: 'designer', label: 'مصمّم الورك فلو', icon: IconWorkflow, main: 'automation', sub: 'designer', section: 'automation' },
   { key: 'templates', label: 'قوالب واتساب', icon: IconTemplate, main: 'whatsapp', sub: 'templates', section: 'whatsapp' },
+  { key: 'contacts', label: 'جهات الاتصال', icon: IconUsers, main: 'whatsapp', sub: 'contacts', section: 'whatsapp' },
+  { key: 'media', label: 'الوسائط', icon: IconDoc, main: 'whatsapp', sub: 'media', section: 'whatsapp' },
   { key: 'automation', label: 'الأتمتة والتقارير', icon: IconBolt, main: 'automation', sub: 'rules', section: 'automation' },
   { key: 'audit', label: 'التدقيق', icon: IconReport, main: 'audit', section: 'audit' },
   { key: 'users', label: 'المستخدمون والأدوار', icon: IconUsers, main: 'users', sub: 'list', section: 'users' },
@@ -84,6 +94,10 @@ function activeTopKey(main: MainTab, sub: string): string {
   if (main === 'contracts' && sub === 'tasks') return 'tasks';
   if (main === 'contracts') return 'contracts';
   if (main === 'whatsapp' && sub === 'templates') return 'templates';
+  if (main === 'whatsapp' && sub === 'contacts') return 'contacts';
+  if (main === 'whatsapp' && sub === 'media') return 'media';
+  if (main === 'whatsapp' && sub === 'inbox') return 'inbox';
+  if (main === 'whatsapp' && sub === 'automation') return 'automation';
   if (main === 'whatsapp') return 'linking';
   if (main === 'automation' && sub === 'designer') return 'designer';
   if (main === 'automation') return 'automation';
@@ -253,7 +267,11 @@ export default function App() {
           {main === 'contracts' && (sub === 'list' || sub === 'new') && <Contracts b={data} reload={reload} sub={sub as 'list' | 'new'} />}
           {main === 'inbox' && <Inbox b={data} reload={reload} me={me} sub={sub as 'conversations' | 'chat' | 'assigned' | 'notes'} />}
           {main === 'whatsapp' && sub === 'templates' && <Templates b={data} reload={reload} canEdit={hasAction(me, 'whatsapp', 'edit')} />}
-          {main === 'whatsapp' && sub !== 'templates' && <WhatsApp b={data} reload={reload} me={me} sub={sub as 'connection' | 'settings' | 'webhook'} />}
+          {main === 'whatsapp' && sub === 'inbox' && <Inbox b={data} reload={reload} me={me} />}
+          {main === 'whatsapp' && sub === 'automation' && <Automation b={data} reload={reload} />}
+          {main === 'whatsapp' && sub === 'contacts' && <Contacts b={data} reload={reload} me={me} />}
+          {main === 'whatsapp' && sub === 'media' && <WhatsAppMedia b={data} reload={reload} me={me} />}
+          {main === 'whatsapp' && (sub === 'connection' || sub === 'settings') && <WhatsApp b={data} reload={reload} me={me} sub={sub as 'connection' | 'settings'} />}
           {main === 'automation' && sub === 'designer' && <WorkflowDesigner workflows={data.workflows} templates={data.templates} reload={reload} />}
           {main === 'automation' && sub === 'rules' && <Automation b={data} reload={reload} only="rules" />}
           {main === 'automation' && sub === 'killswitch' && <Automation b={data} reload={reload} only="killswitch" />}

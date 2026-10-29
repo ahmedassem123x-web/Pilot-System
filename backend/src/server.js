@@ -91,7 +91,31 @@ const ROLE_DEFAULTS = {
     },
   },
 };
-const BANNED_STEP_TYPES = ['release_money', 'refund_money', 'confirm_payment', 'settle_dispute'];
+const BANNED_STEP_TYPES = ['release_money', 'refund_money', 'confirm_payment', 'settle_dispute', 'release_payment', 'refund_payment', 'payment_confirm', 'release_funds', 'refund_funds'];
+// Stage B: automation execution limits + file-upload caps. The 16 MB cap is
+// deliberately BELOW Meta's 100 MB document limit: the free container has
+// limited disk/timeout headroom, and a 16 MB file is ample for contract
+// photos/documents sent on WhatsApp. See docs/zeromsg-adaptation.md.
+const AUTOMATION_MAX_STEPS_PER_RUN = 20;
+const AUTOMATION_COOLDOWN_MS = 60 * 1000;
+const AUTOMATION_MAX_RUNS_PER_MINUTE = 5;
+const UPLOAD_MAX_BYTES = 16 * 1024 * 1024; // 16 MiB, all types
+const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
+const UPLOAD_ALLOWED = {
+  '.jpg': { mime: 'image/jpeg', kind: 'image' }, '.jpeg': { mime: 'image/jpeg', kind: 'image' },
+  '.png': { mime: 'image/png', kind: 'image' },
+  '.mp4': { mime: 'video/mp4', kind: 'video' }, '.3gp': { mime: 'video/3gpp', kind: 'video' },
+  '.aac': { mime: 'audio/aac', kind: 'audio' }, '.amr': { mime: 'audio/amr', kind: 'audio' },
+  '.mp3': { mime: 'audio/mpeg', kind: 'audio' }, '.ogg': { mime: 'audio/ogg', kind: 'audio' },
+  '.opus': { mime: 'audio/opus', kind: 'audio' },
+  '.pdf': { mime: 'application/pdf', kind: 'document' }, '.doc': { mime: 'application/msword', kind: 'document' },
+  '.docx': { mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', kind: 'document' },
+  '.xls': { mime: 'application/vnd.ms-excel', kind: 'document' },
+  '.xlsx': { mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', kind: 'document' },
+  '.ppt': { mime: 'application/vnd.ms-powerpoint', kind: 'document' },
+  '.pptx': { mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', kind: 'document' },
+  '.txt': { mime: 'text/plain', kind: 'document' },
+};
 const FILE_KINDS = ['original', 'buyer_signed', 'seller_signed', 'attachment'];
 const TEMPLATE_STATUSES = ['pending', 'approved', 'rejected'];
 const CONVERSATION_STATUSES = ['new', 'open', 'pending', 'resolved', 'closed'];
@@ -188,11 +212,11 @@ function clearLoginFailures(ip) { loginFailures.delete(ip); }
 // ---- Data store ----
 function load() {
   try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
-  catch { return { users: [], contracts: [], conversations: [], messages: [], tasks: [], workflows: [], templates: [], rules: [], audit: [], killSwitch: false, seq: 1 }; }
+  catch { return { users: [], contracts: [], conversations: [], messages: [], tasks: [], workflows: [], templates: [], rules: [], audit: [], killSwitch: false, seq: 1, automation_logs: [], uploads: [] }; }
 }
 let db = load();
 // Migrate older data files: never drop existing rows, just add new collections.
-for (const k of ['users', 'contracts', 'conversations', 'messages', 'tasks', 'workflows', 'templates', 'rules', 'audit', 'contract_versions', 'contract_files']) {
+for (const k of ['users', 'contracts', 'conversations', 'messages', 'tasks', 'workflows', 'templates', 'rules', 'audit', 'contract_versions', 'contract_files', 'automation_logs', 'uploads', 'contacts']) {
   if (!Array.isArray(db[k])) db[k] = [];
 }
 if (typeof db.killSwitch !== 'boolean') db.killSwitch = false;
@@ -268,10 +292,34 @@ function metaConfig() {
   const token = process.env.WHATSAPP_ACCESS_TOKEN || '';
   const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID || '';
   const wabaId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || '';
+  // Embedded Signup identifiers only: App ID / Config ID are public
+  // launch parameters, NOT secrets. The App Secret is never returned.
+  const appId = process.env.WHATSAPP_APP_ID || '';
+  const configId = process.env.WHATSAPP_CONFIG_ID || '';
+  const appSecret = process.env.WHATSAPP_APP_SECRET || '';
   return {
     base: (mock || 'https://graph.facebook.com').replace(/\/+$/, ''),
     version, token, phoneId, wabaId, mock: !!mock,
     configured: !!(token && phoneId && wabaId),
+    appId, configId,
+    embeddedConfigured: !!(appId && configId && appSecret),
+    embedded: {
+      app_id_configured: !!appId, config_id_configured: !!configId,
+      app_secret_configured: !!appSecret,
+    },
+  };
+}
+// Embedded Signup launch URL components (no secret in any of them).
+// The frontend builds the final URL from these + its own origin as
+// redirect_uri; redirect_uri must be whitelisted in the Meta App
+// (Valid OAuth Redirect URIs) or Meta rejects the launch.
+function embeddedLaunchParams(cfg) {
+  return {
+    dialog_base: 'https://www.facebook.com',
+    dialog_path: '/' + cfg.version + '/dialog/oauth',
+    client_id: cfg.appId, config_id: cfg.configId,
+    response_type: 'code', override_default_response_type: true,
+    scope: 'whatsapp_business_management,whatsapp_business_messaging',
   };
 }
 // Sanitised Meta error: code + message only, capped, never a token.
@@ -282,8 +330,9 @@ function metaErrorInfo(parsed) {
   }
   return { error: 'meta request failed' };
 }
-function metaRequest(method, path, bodyObj) {
+function metaRequest(method, path, bodyObj, tokenOverride) {
   const cfg = metaConfig();
+  const token = tokenOverride !== undefined ? tokenOverride : cfg.token;
   return new Promise((resolve) => {
     let url;
     try { url = new URL(`${cfg.base}/${cfg.version}${path}`); }
@@ -291,7 +340,7 @@ function metaRequest(method, path, bodyObj) {
     const lib = url.protocol === 'http:' ? require('http') : require('https');
     const payload = bodyObj ? JSON.stringify(bodyObj) : null;
     const headers = { 'Content-Type': 'application/json' };
-    if (cfg.token) headers.Authorization = 'Bearer ' + cfg.token;
+    if (token) headers.Authorization = 'Bearer ' + token;
     const req = lib.request(url, { method, headers, timeout: 10000 }, (resp) => {
       let data = '';
       resp.on('data', (c) => { data += c; });
@@ -373,8 +422,33 @@ function mapMetaTemplateStatus(s) {
   return null;
 }
 function contractCode(n) { return 'PS-' + String(1000 + n); }
+function stepIsBanned(s) {
+  if (typeof s === 'string') return BANNED_STEP_TYPES.includes(s);
+  if (!s || typeof s !== 'object') return false;
+  const t = s.step_type || s.action || s.type || '';
+  if (BANNED_STEP_TYPES.includes(t)) return true;
+  // A contract-state step that moves money state is banned even if it
+  // does not use a banned name: payment confirmation / refund states
+  // are human-only, always, with an FI reference.
+  if ((t === 'contract_transition' || t === 'state_change' || t === 'update_contract_state') &&
+      ['payment_confirmed', 'refund_pending', 'refunded'].includes(String(s.to || s.target_state || ''))) return true;
+  return false;
+}
 function hasBannedStep(steps) {
-  return (steps || []).some((s) => BANNED_STEP_TYPES.includes(s.step_type || s.action));
+  // Recursive: condition branches (then/else/steps/branches) are checked
+  // too, at save time AND again at execution time.
+  const walk = (arr) => {
+    for (const s of (arr || [])) {
+      if (stepIsBanned(s)) return true;
+      if (s && typeof s === 'object') {
+        for (const k of ['then', 'else', 'steps', 'branches', 'children']) {
+          if (Array.isArray(s[k]) && walk(s[k])) return true;
+        }
+      }
+    }
+    return false;
+  };
+  return walk(steps);
 }
 // Normalise steps: assign/keep an explicit `order` field, then sort by it.
 function normaliseSteps(steps) {
@@ -390,6 +464,93 @@ function onlyActiveOwnerCount() {
 }
 function contractVersions(contractId) {
   return db.contract_versions.filter((v) => v.contract_id === contractId).sort((a, b) => a.version - b.version);
+}
+
+// ================= Stage C: contacts (contract-scoped address book) =================
+// A contact is a staff-curated record for a customer phone. It NEVER creates
+// a contract, a conversation, or a broadcast audience: there is no broadcast
+// endpoint anywhere in this server, and contacts are used only to look up
+// the conversations/contracts that already exist for that phone.
+// Permission family: whatsapp:view (read) / whatsapp:edit (write/import) —
+// the same family as templates and uploads. There is deliberately no
+// separate contacts permission: role defaults grant whatsapp only to owner,
+// so other roles need an explicit whatsapp section/action override.
+// Utility-messaging eligibility is COMPUTED, never claimed by staff:
+//   utility_eligible = true iff the phone has (a) a prior inbound message,
+//   or (b) an outbound template message actually sent via Meta (dry_run
+//   false and a Meta wamid present). A staff-local /api/messages record
+//   with a template name, an internal note, or a dry-run record never
+//   confers eligibility, and creating a contact never confers it either.
+//   Eligibility is a record of a past interaction, not consent: staff must
+//   still respect Meta's 24h window / approved-template rules on every send.
+function validContactPhone(p) { return /^\+?\d{7,15}$/.test(normPhone(p)); }
+function contactMatchesConversation(contact, conv) {
+  const key = phoneKey(contact.phone);
+  if (conv.contract_id !== null && conv.contract_id !== undefined) {
+    const c = db.contracts.find((x) => x.id === conv.contract_id);
+    if (!c) return false;
+    return (conv.party === 'buyer' && phoneKey(c.buyer_phone) === key) || (conv.party === 'seller' && phoneKey(c.seller_phone) === key);
+  }
+  return conv.party === 'general' && phoneKey(conv.phone) === key;
+}
+function contactLinks(contact) {
+  const key = phoneKey(contact.phone);
+  const convs = db.conversations.filter((c) => contactMatchesConversation(contact, c));
+  const convIds = new Set(convs.map((c) => c.id));
+  const contracts = [];
+  const roles = [];
+  for (const c of db.contracts) {
+    if (phoneKey(c.buyer_phone) === key) { contracts.push({ id: c.id, code: c.code, state: c.state, role: 'buyer' }); if (!roles.includes('buyer')) roles.push('buyer'); }
+    if (phoneKey(c.seller_phone) === key) { contracts.push({ id: c.id, code: c.code, state: c.state, role: 'seller' }); if (!roles.includes('seller')) roles.push('seller'); }
+  }
+  const msgs = db.messages.filter((m) => convIds.has(m.conversation_id) && !m.is_internal_note);
+  let lastContactAt = null;
+  for (const m of msgs) if (m.created_at && (!lastContactAt || m.created_at > lastContactAt)) lastContactAt = m.created_at;
+  let eligibilityBasis = null;
+  if (msgs.some((m) => m.direction === 'in')) eligibilityBasis = 'prior_inbound';
+  else if (msgs.some((m) => m.direction === 'out' && m.template_name && m.dry_run !== true && m.wamid)) eligibilityBasis = 'approved_template';
+  return {
+    roles,
+    contracts,
+    conversations: convs.map((c) => ({ id: c.id, contract_id: c.contract_id, party: c.party, status: c.status, unread_count: c.unread_count || 0, last_inbound_at: c.last_inbound_at || null })),
+    last_contact_at: lastContactAt,
+    message_count: msgs.length,
+    utility_eligible: eligibilityBasis !== null,
+    eligibility_basis: eligibilityBasis,
+  };
+}
+function contactPublic(contact) { return { ...contact, ...contactLinks(contact) }; }
+function parseContactLabels(v) {
+  const raw = Array.isArray(v) ? v : (typeof v === 'string' ? v.split(',') : []);
+  const out = [];
+  for (const x of raw) {
+    const t = String(x || '').trim().slice(0, 50);
+    if (t && !out.includes(t)) out.push(t);
+  }
+  return out.slice(0, 20);
+}
+// Minimal CSV parser: quoted fields, "" escapes, commas, CRLF/LF. Returns
+// rows of cell strings; fully-empty rows are dropped by the caller.
+function parseCsv(text) {
+  const rows = []; let row = []; let cell = ''; let inQuotes = false;
+  const src = String(text || '').replace(/^\ufeff/, '');
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (src[i + 1] === '"') { cell += '"'; i++; } else inQuotes = false;
+      } else cell += ch;
+    } else if (ch === '"') inQuotes = true;
+    else if (ch === ',') { row.push(cell); cell = ''; }
+    else if (ch === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
+    else if (ch !== '\r') cell += ch;
+  }
+  row.push(cell); rows.push(row);
+  return rows.filter((r) => r.some((c) => String(c).trim() !== ''));
+}
+function csvEscape(v) {
+  const s = String(v === null || v === undefined ? '' : v);
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 
 // ---- Permissions ----
@@ -435,11 +596,606 @@ function rejectUnknown(body, allowed) {
   return bad.length ? `unknown field: ${bad[0]}` : null;
 }
 
+// ---- Template validation / preview (Stage A) ----
+// Placeholders must be {{1}}, {{2}}, ... in sequence, no gaps/duplicates.
+// Meta also rejects a body that starts or ends with a placeholder.
+function templatePlaceholders(body) {
+  const nums = [];
+  for (const m of String(body || '').matchAll(/\{\{(\d+)\}\}/g)) nums.push(Number(m[1]));
+  return nums;
+}
+function templatePreview(t, samples) {
+  let out = String(t.body || '');
+  const vals = Array.isArray(samples) ? samples : (Array.isArray(t.sample_values) ? t.sample_values : []);
+  out = out.replace(/\{\{(\d+)\}\}/g, (_, n) => {
+    const v = vals[Number(n) - 1];
+    return v !== undefined && v !== '' ? String(v) : '[مثال ' + n + ']';
+  });
+  return out;
+}
+function templateSendable(t, metaConfigured) {
+  if (t.approval_status !== 'approved') return { sendable: false, reason: 'template_not_approved' };
+  if (metaConfigured && t.meta_status !== 'approved') return { sendable: false, reason: 'template_not_meta_approved' };
+  return { sendable: true, reason: null };
+}
+const HEADER_TYPES = ['text', 'image', 'video', 'document'];
+function normalizeTemplateButtons(buttons) {
+  if (!Array.isArray(buttons)) return [];
+  return buttons.map((b) => {
+    if (typeof b === 'string') return { type: 'QUICK_REPLY', title: b };
+    if (b && typeof b === 'object') {
+      const title = b.title || b.text || '';
+      return { type: b.type || 'QUICK_REPLY', title: String(title), ...(b.url ? { url: b.url } : {}), ...(b.phone_number ? { phone_number: b.phone_number } : {}) };
+    }
+    return null;
+  }).filter(Boolean);
+}
+function validateTemplateInput(body) {
+  // Returns an error string, or null. Name/category/language are
+  // immutable after creation and are validated by callers on create.
+  if (body.body !== undefined && !String(body.body).trim()) return 'body is required';
+  const b = body.body !== undefined ? String(body.body) : null;
+  if (b !== null) {
+    const nums = templatePlaceholders(b);
+    const sorted = [...nums].sort((x, y) => x - y);
+    for (let i = 0; i < sorted.length; i++) if (sorted[i] !== i + 1) return 'placeholders must be {{1}}, {{2}}, ... in sequence with no gaps or duplicates';
+    // Note: starting/ending with a placeholder is discouraged by Meta guidance
+    // but is NOT hard-rejected here, to keep existing templates valid.
+  }
+  if (body.header_type !== undefined && body.header_type !== null && !HEADER_TYPES.includes(body.header_type)) return 'header_type must be text, image, video or document';
+  if (body.header_type === 'text' && (!body.header_text || !String(body.header_text).trim())) return 'header_text is required when header_type is text';
+  if (body.footer !== undefined && body.footer !== null && String(body.footer).length > 60) return 'footer must be at most 60 characters';
+  if (body.buttons !== undefined) {
+    if (!Array.isArray(body.buttons) || body.buttons.length > 3) return 'buttons must be an array of at most 3';
+    const norm = normalizeTemplateButtons(body.buttons);
+    if (norm.length !== body.buttons.length) return 'each button needs a title';
+    if (norm.some((x) => !x.title || String(x.title).length > 25)) return 'each button title must be at most 25 characters';
+  }
+  if (body.sample_values !== undefined && body.sample_values !== null) {
+    if (!Array.isArray(body.sample_values) || body.sample_values.some((v) => typeof v !== 'string')) return 'sample_values must be an array of strings';
+  }
+  return null;
+}
+function templatePublic(t, metaConfigured) {
+  const gate = templateSendable(t, metaConfigured);
+  return { ...t, placeholders: templatePlaceholders(t.body), preview: templatePreview(t), sendable: gate.sendable, send_block_reason: gate.reason };
+}
+
+// ================= Stage B: automation execution + file upload =================
+// Arabic normalisation for keyword matching: strip diacritics/tatweel,
+// unify alef forms, ة/ى variants, collapse whitespace. Applied to BOTH the
+// inbound text and the trigger value, so "عَقْد جديد" matches "عقد جديد".
+function normalizeArabic(s) {
+  return String(s || '').toLowerCase()
+    .replace(/[\u064B-\u0652\u0670]/g, '')
+    .replace(/\u0640/g, '')
+    .replace(/[أإآ]/g, 'ا').replace(/ؤ/g, 'و').replace(/ئ/g, 'ي').replace(/ى/g, 'ي').replace(/ة/g, 'ه')
+    .replace(/\s+/g, ' ').trim();
+}
+function phoneForConversation(conv) {
+  if (!conv) return null;
+  if (conv.contract_id !== null && conv.contract_id !== undefined) {
+    const c = db.contracts.find((x) => x.id === conv.contract_id);
+    if (c) return conv.party === 'seller' ? c.seller_phone : c.buyer_phone;
+  }
+  return conv.phone || null;
+}
+function convAutomationState(conv) {
+  if (!conv.automation_handed_off) conv.automation_handed_off = false;
+  if (typeof conv.automation_unknown_count !== 'number') conv.automation_unknown_count = 0;
+  if (!conv.automation_waiting) conv.automation_waiting = null;
+  if (!Array.isArray(conv.labels)) conv.labels = [];
+  if (!conv.automation_last_run) conv.automation_last_run = {};
+  if (!Array.isArray(conv.automation_recent_runs)) conv.automation_recent_runs = [];
+  return conv;
+}
+function automationLog(conv, workflow, outcome, details = {}) {
+  const rec = { id: nextId(), conversation_id: conv ? conv.id : null, workflow_id: workflow ? workflow.id : null, workflow_kind: workflow ? workflow._kind || null : null, workflow_name: workflow ? workflow.name : null, outcome, details, created_at: new Date().toISOString() };
+  db.automation_logs.push(rec);
+  return rec;
+}
+// Business-hours check. trigger_value may be "HH:MM-HH:MM" (server local
+// time); default 09:00-17:00. Handles overnight ranges (start > end).
+function parseHoursRange(v) {
+  const m = String(v || '').match(/^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/);
+  if (!m) return { start: 9 * 60, end: 17 * 60 };
+  return { start: Number(m[1]) * 60 + Number(m[2]), end: Number(m[3]) * 60 + Number(m[4]) };
+}
+function isBusinessHoursNow(v) {
+  const { start, end } = parseHoursRange(v);
+  const now = new Date(); const mins = now.getHours() * 60 + now.getMinutes();
+  return start <= end ? (mins >= start && mins < end) : (mins >= start || mins < end);
+}
+function triggerKey(w) { return (w._kind || 'workflow') + ':' + w.id; }
+function keywordMatchKind(triggerValue, normInbound) {
+  const tv = normalizeArabic(triggerValue);
+  if (!tv || !normInbound) return null;
+  if (normInbound === tv) return 'exact';
+  if (normInbound.includes(tv)) return 'contains';
+  return null;
+}
+// --- Automation send (single place for the Stage A send gate) ---
+// Returns {sent, dry_run, blocked_reason}. NEVER claims sent on dry-run.
+async function automationSend(conv, spec) {
+  const phone = phoneForConversation(conv);
+  if (!phone) return { sent: false, dry_run: false, blocked_reason: 'no_phone' };
+  if (db.killSwitch) return { sent: false, dry_run: false, blocked_reason: 'kill_switch_on' };
+  const cfg = metaConfig();
+  let metaPayload = null; let bodyText = null; let templateName = null; let mediaType = null;
+  if (spec.kind === 'template') {
+    const tpl = db.templates.find((t) => t.name === spec.template_name);
+    if (!tpl) return { sent: false, dry_run: false, blocked_reason: 'template_not_found' };
+    if (tpl.approval_status !== 'approved') return { sent: false, dry_run: false, blocked_reason: 'template_not_approved' };
+    if (cfg.configured && tpl.meta_status !== 'approved') return { sent: false, dry_run: false, blocked_reason: 'template_not_meta_approved' };
+    templateName = tpl.name;
+    const components = [];
+    if (Array.isArray(spec.parameters) && spec.parameters.length) components.push({ type: 'body', parameters: spec.parameters.map((v) => ({ type: 'text', text: String(v) })) });
+    metaPayload = { messaging_product: 'whatsapp', to: phoneKey(phone), type: 'template', template: { name: tpl.name, language: { code: spec.language || tpl.language || 'ar' }, ...(components.length ? { components } : {}) } };
+  } else if (spec.kind === 'buttons' || spec.kind === 'list') {
+    if (!within24h(lastInboundAtForPhone(phone))) return { sent: false, dry_run: false, blocked_reason: 'outside_24h_window_use_template' };
+    bodyText = spec.body || '';
+    if (spec.kind === 'buttons') metaPayload = { messaging_product: 'whatsapp', to: phoneKey(phone), type: 'interactive', interactive: { type: 'button', body: { text: bodyText }, action: { buttons: (spec.buttons || []).slice(0, 3).map((b) => ({ type: 'reply', reply: { id: typeof b === 'string' ? b : (b.id || b.title), title: typeof b === 'string' ? b : b.title } })) } } };
+    else metaPayload = { messaging_product: 'whatsapp', to: phoneKey(phone), type: 'interactive', interactive: { type: 'list', body: { text: bodyText }, action: { sections: [{ title: 'options', rows: (spec.items || []).slice(0, 10).map((it, i) => ({ id: 'row' + (i + 1), title: typeof it === 'string' ? it : it.title })) }] } } };
+  } else if (spec.kind === 'media') {
+    if (!within24h(lastInboundAtForPhone(phone))) return { sent: false, dry_run: false, blocked_reason: 'outside_24h_window_use_template' };
+    mediaType = spec.media_type;
+    if (!spec.media_id && !spec.media_link) return { sent: false, dry_run: false, blocked_reason: 'media_id_or_link_required' };
+    bodyText = spec.caption || null;
+    metaPayload = { messaging_product: 'whatsapp', to: phoneKey(phone), type: mediaType, [mediaType]: { ...(spec.media_link ? { link: spec.media_link } : { id: spec.media_id }), ...(spec.caption ? { caption: spec.caption } : {}) } };
+  } else {
+    if (!within24h(lastInboundAtForPhone(phone))) return { sent: false, dry_run: false, blocked_reason: 'outside_24h_window_use_template' };
+    bodyText = spec.body || '';
+    metaPayload = { messaging_product: 'whatsapp', to: phoneKey(phone), type: 'text', text: { body: bodyText } };
+  }
+  if (!cfg.configured) {
+    const m = { id: nextId(), conversation_id: conv.id, direction: 'out', sender_phone: null, to_phone: normPhone(phone), body: bodyText, template_name: templateName, media_type: mediaType, wamid: null, meta_status: null, dry_run: true, automation: true, created_at: new Date().toISOString() };
+    db.messages.push(m);
+    audit('automation', 'message', m.id, 'automation_send_dry_run', { conversation_id: conv.id, template_name: templateName });
+    return { sent: false, dry_run: true, message: m };
+  }
+  const r = await metaRequest('POST', `/${cfg.phoneId}/messages`, metaPayload);
+  if (!r.ok) {
+    audit('automation', 'whatsapp', 0, 'automation_send_failed', { conversation_id: conv.id, meta_error_code: r.meta_error_code || null });
+    return { sent: false, dry_run: false, blocked_reason: 'meta_send_failed', meta_error_code: r.meta_error_code || null };
+  }
+  const wamid = r.data && r.data.messages && r.data.messages[0] ? r.data.messages[0].id : null;
+  const m = { id: nextId(), conversation_id: conv.id, direction: 'out', sender_phone: null, to_phone: normPhone(phone), body: bodyText, template_name: templateName, media_type: mediaType, wamid, meta_status: 'sent', dry_run: false, automation: true, created_at: new Date().toISOString() };
+  db.messages.push(m);
+  audit('automation', 'message', m.id, 'automation_sent', { conversation_id: conv.id, wamid, template_name: templateName });
+  return { sent: true, dry_run: false, message: m, wamid };
+}
+function stepText(s) { return s.content || s.text || s.body || s.question || s.caption || s.action_text || ''; }
+function stepTemplateName(s) { return s.template_name || s.template || null; }
+function stepMediaSpec(s) {
+  const kind = ['image', 'video', 'audio', 'document'].includes(s.step_type) ? s.step_type : (s.media && s.media.type) || s.media_type || 'image';
+  const media = s.media || {};
+  return { kind: 'media', media_type: kind, media_link: s.media_url || s.link || media.link || null, media_id: s.media_id || media.id || null, caption: s.caption || s.body || null };
+}
+async function executeSteps(conv, workflow, steps, ctx) {
+  // Returns 'done' | 'paused' | 'handoff' | 'blocked'. ctx carries the
+  // latest inbound text for condition evaluation and a sends counter.
+  const ordered = (steps || []).map((s, i) => ({ ...s, order: (typeof s.order === 'number' ? s.order : i) })).sort((a, b) => a.order - b.order);
+  for (const s of ordered) {
+    if (ctx.stepsDone >= AUTOMATION_MAX_STEPS_PER_RUN) { automationLog(conv, workflow, 'truncated_loop_guard', { max_steps: AUTOMATION_MAX_STEPS_PER_RUN }); return 'blocked'; }
+    if (stepIsBanned(s) || hasBannedStep([s])) {
+      automationLog(conv, workflow, 'blocked_money_step', { step_type: s.step_type || s.action || null });
+      audit('automation', 'workflow', workflow.id, 'automation_rejected_money_step', { conversation_id: conv.id, step_type: s.step_type || s.action || null });
+      return 'blocked';
+    }
+    ctx.stepsDone++;
+    const t = s.step_type || s.action || s.type || '';
+    if (t === 'end') { automationLog(conv, workflow, 'step_end', {}); return 'done'; }
+    if (t === 'handoff' || t === 'human_handoff' || t === 'handover') {
+      conv.automation_handed_off = true; conv.automation_waiting = null;
+      automationLog(conv, workflow, 'handoff', { note: s.handover_note || s.note || null });
+      audit('automation', 'conversation', conv.id, 'automation_handoff', { workflow_id: workflow.id });
+      return 'handoff';
+    }
+    if (t === 'text' || t === 'send_text') {
+      const r = await automationSend(conv, { kind: 'text', body: stepText(s) });
+      ctx.sends += r.sent || r.dry_run ? 1 : 0;
+      automationLog(conv, workflow, r.sent ? 'sent' : (r.dry_run ? 'dry_run' : 'send_blocked'), { step_type: t, blocked_reason: r.blocked_reason || null });
+      if (r.blocked_reason === 'kill_switch_on') return 'blocked';
+      continue;
+    }
+    if (t === 'template' || t === 'send_template') {
+      const r = await automationSend(conv, { kind: 'template', template_name: stepTemplateName(s), parameters: s.parameters || s.sample_values || [] });
+      ctx.sends += r.sent || r.dry_run ? 1 : 0;
+      automationLog(conv, workflow, r.sent ? 'sent' : (r.dry_run ? 'dry_run' : 'send_blocked'), { step_type: t, template_name: stepTemplateName(s), blocked_reason: r.blocked_reason || null });
+      if (r.blocked_reason === 'kill_switch_on') return 'blocked';
+      continue;
+    }
+    if (t === 'image' || t === 'video' || t === 'audio' || t === 'document' || t === 'send_media' || t === 'media') {
+      const r = await automationSend(conv, stepMediaSpec(s));
+      ctx.sends += r.sent || r.dry_run ? 1 : 0;
+      automationLog(conv, workflow, r.sent ? 'sent' : (r.dry_run ? 'dry_run' : 'send_blocked'), { step_type: t, blocked_reason: r.blocked_reason || null });
+      if (r.blocked_reason === 'kill_switch_on') return 'blocked';
+      continue;
+    }
+    if (t === 'buttons' || t === 'list') {
+      const titles = t === 'buttons' ? (s.buttons || []) : (s.items || []);
+      const r = await automationSend(conv, { kind: t, body: stepText(s), buttons: titles, items: titles });
+      ctx.sends += r.sent || r.dry_run ? 1 : 0;
+      automationLog(conv, workflow, r.sent ? 'sent' : (r.dry_run ? 'dry_run' : 'send_blocked'), { step_type: t, blocked_reason: r.blocked_reason || null });
+      if (r.blocked_reason === 'kill_switch_on') return 'blocked';
+      continue;
+    }
+    if (t === 'question_text' || t === 'question_number' || t === 'media_request' || t === 'ask_question' || t === 'question') {
+      const r = await automationSend(conv, { kind: 'text', body: stepText(s) });
+      ctx.sends += r.sent || r.dry_run ? 1 : 0;
+      automationLog(conv, workflow, r.sent ? 'question_sent_waiting' : (r.dry_run ? 'question_dry_run_waiting' : 'send_blocked'), { step_type: t, blocked_reason: r.blocked_reason || null });
+      if (r.blocked_reason === 'kill_switch_on') return 'blocked';
+      // Wait for the customer's reply: store the NEXT step index. The
+      // waiting pointer is set by runAutomation (it knows the index);
+      // here we signal pause via ctx and the caller records it.
+      ctx.pauseAfterIndex = ctx.currentIndex;
+      return 'paused';
+    }
+    if (t === 'condition' || t === 'branch') {
+      const cond = s.condition || {};
+      const needle = s.if_contains || s.contains || cond.contains || cond.value_contains || null;
+      const exact = s.if_equals || s.equals || cond.equals || null;
+      let result = null;
+      const normIn = normalizeArabic(ctx.inboundText || '');
+      if (needle !== null && needle !== undefined) result = normIn.includes(normalizeArabic(needle));
+      else if (exact !== null && exact !== undefined) result = normIn === normalizeArabic(exact);
+      else { automationLog(conv, workflow, 'condition_unstructured_skipped', { condition_expr: s.condition_expr || null }); continue; }
+      const branch = result ? (s.then || s.then_steps || s.branches || []) : (s.else || s.else_steps || []);
+      const sub = await executeSteps(conv, workflow, branch, ctx);
+      if (sub !== 'done') return sub;
+      continue;
+    }
+    if (t === 'assign' || t === 'assign_conversation') {
+      conv.assigned_to = s.assigned_to || s.assignee || s.value || conv.assigned_to;
+      automationLog(conv, workflow, 'assigned', { assigned_to: conv.assigned_to });
+      audit('automation', 'conversation', conv.id, 'automation_assigned', { workflow_id: workflow.id, assigned_to: conv.assigned_to });
+      continue;
+    }
+    if (t === 'add_label' || t === 'label') {
+      const label = s.label || s.value || stepText(s);
+      if (label && !conv.labels.includes(label)) conv.labels.push(label);
+      automationLog(conv, workflow, 'label_added', { label: label || null });
+      continue;
+    }
+    if (t === 'add_note' || t === 'note' || t === 'internal_note') {
+      const m = { id: nextId(), conversation_id: conv.id, direction: 'out', sender_name: 'automation', body: stepText(s) || null, template_name: null, is_internal_note: true, created_at: new Date().toISOString() };
+      db.messages.push(m);
+      automationLog(conv, workflow, 'note_added', { message_id: m.id });
+      continue;
+    }
+    if (t === 'create_task' || t === 'task') {
+      const task = { id: nextId(), contract_id: conv.contract_id || null, title: s.title || stepText(s) || 'مهمة من الأتمتة', type: 'automation', status: 'open', assigned_to: s.assigned_to || null, created_at: new Date().toISOString() };
+      db.tasks.push(task);
+      automationLog(conv, workflow, 'task_created', { task_id: task.id, title: task.title });
+      audit('automation', 'task', task.id, 'automation_task_created', { workflow_id: workflow.id, conversation_id: conv.id });
+      continue;
+    }
+    if (t === 'webhook_out' || t === 'webhook') {
+      const target = s.url || s.webhook_url || null;
+      if (!target) { automationLog(conv, workflow, 'webhook_skipped_no_url', {}); continue; }
+      let ok = false; let statusCode = null;
+      try {
+        const u = new URL(target);
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error('unsupported protocol');
+        const lib = u.protocol === 'http:' ? require('http') : require('https');
+        const payload = JSON.stringify({ event: 'automation', conversation_id: conv.id, workflow_id: workflow.id, workflow_name: workflow.name });
+        const res = await new Promise((resolve) => {
+          const rq = lib.request(u, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }, timeout: 5000 }, (resp) => { resp.resume(); resp.on('end', () => resolve({ status: resp.statusCode })); });
+          rq.on('timeout', () => { rq.destroy(); resolve({ status: null }); });
+          rq.on('error', () => resolve({ status: null }));
+          rq.write(payload); rq.end();
+        });
+        statusCode = res.status; ok = statusCode !== null && statusCode >= 200 && statusCode < 300;
+      } catch { ok = false; }
+      automationLog(conv, workflow, ok ? 'webhook_sent' : 'webhook_failed', { status: statusCode });
+      continue;
+    }
+    if (t === 'delay') {
+      const ms = typeof s.delay_ms === 'number' ? s.delay_ms : (typeof s.delay_seconds === 'number' ? s.delay_seconds * 1000 : 0);
+      automationLog(conv, workflow, 'delay', { delay_ms: ms, waited_ms: Math.min(ms, 2000) });
+      if (ms > 0) await new Promise((r) => setTimeout(r, Math.min(ms, 2000)));
+      continue;
+    }
+    if (t === 'action') { automationLog(conv, workflow, 'action_logged', { action_text: s.action_text || null }); continue; }
+    automationLog(conv, workflow, 'step_skipped_unknown', { step_type: t });
+  }
+  return 'done';
+}
+// Run one workflow/rule against one conversation. startIndex is used for
+// ask-question continuations. Returns a result object; never throws.
+async function runAutomation(conv, workflow, opts = {}) {
+  convAutomationState(conv);
+  const startIndex = opts.startIndex || 0;
+  const steps = normaliseSteps(workflow.steps || []);
+  if (db.killSwitch) {
+    automationLog(conv, workflow, 'blocked_kill_switch', {});
+    audit('automation', 'workflow', workflow.id, 'automation_blocked_kill_switch', { conversation_id: conv.id });
+    save(); return { ran: false, blocked_reason: 'kill_switch_on' };
+  }
+  if (conv.automation_handed_off && !opts.manual) {
+    automationLog(conv, workflow, 'blocked_handed_off', {});
+    save(); return { ran: false, blocked_reason: 'handed_off' };
+  }
+  if (hasBannedStep(steps)) {
+    automationLog(conv, workflow, 'blocked_money_step', {});
+    audit('automation', 'workflow', workflow.id, 'automation_rejected_money_step', { conversation_id: conv.id });
+    save(); return { ran: false, blocked_reason: 'money_step' };
+  }
+  if (!opts.manual && !opts.continuation) {
+    const key = triggerKey(workflow);
+    const last = conv.automation_last_run[key] ? Date.parse(conv.automation_last_run[key]) : 0;
+    if (last && Date.now() - last < AUTOMATION_COOLDOWN_MS) {
+      automationLog(conv, workflow, 'blocked_cooldown', { cooldown_ms: AUTOMATION_COOLDOWN_MS });
+      save(); return { ran: false, blocked_reason: 'cooldown' };
+    }
+    const now = Date.now();
+    conv.automation_recent_runs = (conv.automation_recent_runs || []).filter((x) => now - Date.parse(x) < 60 * 1000);
+    if (conv.automation_recent_runs.length >= AUTOMATION_MAX_RUNS_PER_MINUTE) {
+      automationLog(conv, workflow, 'blocked_loop_guard', { max_runs_per_minute: AUTOMATION_MAX_RUNS_PER_MINUTE });
+      save(); return { ran: false, blocked_reason: 'loop_guard' };
+    }
+    conv.automation_recent_runs.push(new Date().toISOString());
+  }
+  conv.automation_last_run[triggerKey(workflow)] = new Date().toISOString();
+  const ctx = { inboundText: opts.inboundText || '', stepsDone: 0, sends: 0, currentIndex: startIndex, pauseAfterIndex: null };
+  // executeSteps iterates its own ordered copy; to support pause/resume
+  // we run the slice from startIndex and translate pause back to an
+  // absolute index via stepsDone counting (pause is only set by an
+  // ask-question step, which is the last executed step in that slice).
+  const slice = steps.slice(startIndex);
+  // Track pause: wrap executeSteps so a pause returns the absolute index.
+  let outcome = 'done';
+  outcome = await executeSteps(conv, workflow, slice, ctx);
+  if (outcome === 'paused') {
+    // The ask-question step was the last executed step in the slice.
+    const absIndex = startIndex + ctx.stepsDone - 1;
+    conv.automation_waiting = { workflow_id: workflow.id, workflow_kind: workflow._kind || 'workflow', next_index: absIndex + 1, set_at: new Date().toISOString() };
+    automationLog(conv, workflow, 'waiting_for_reply', { next_index: absIndex + 1 });
+  } else {
+    if (conv.automation_waiting && conv.automation_waiting.workflow_id === workflow.id) conv.automation_waiting = null;
+    automationLog(conv, workflow, outcome === 'handoff' ? 'completed_handoff' : (outcome === 'blocked' ? 'completed_blocked' : 'completed'), { steps_done: ctx.stepsDone, sends: ctx.sends });
+  }
+  audit('automation', 'workflow', workflow.id, 'automation_run', { conversation_id: conv.id, outcome, steps_done: ctx.stepsDone, sends: ctx.sends });
+  save();
+  return { ran: true, outcome, steps_done: ctx.stepsDone, sends: ctx.sends };
+}
+function allAutomationCandidates() {
+  const list = [];
+  for (const w of db.workflows) if (w.is_active !== false) list.push({ ...w, _kind: 'workflow' });
+  for (const r of db.rules) if (r.is_active) list.push({ ...r, _kind: 'rule' });
+  return list;
+}
+// Inbound routing: continuation first, then exact keyword > contains
+// keyword (longest wins) > button/list reply > first message >
+// business-hours/away > fallback after 2 unknowns.
+async function runInboundAutomation(conv, inbound) {
+  convAutomationState(conv);
+  const candidates = allAutomationCandidates();
+  // Waiting continuation: any new inbound resumes the waiting flow.
+  if (conv.automation_waiting) {
+    const w = candidates.find((x) => x.id === conv.automation_waiting.workflow_id && x._kind === (conv.automation_waiting.workflow_kind || 'workflow'));
+    if (w && !conv.automation_handed_off) {
+      const next = conv.automation_waiting.next_index;
+      conv.automation_waiting = null;
+      conv.automation_unknown_count = 0;
+      return runAutomation(conv, w, { continuation: true, startIndex: next, inboundText: inbound.text || '' });
+    }
+    conv.automation_waiting = null;
+  }
+  if (conv.automation_handed_off) return { ran: false, blocked_reason: 'handed_off' };
+  if (db.killSwitch) {
+    const any = candidates.length > 0;
+    if (any) { automationLog(conv, null, 'blocked_kill_switch', {}); audit('automation', 'conversation', conv.id, 'automation_blocked_kill_switch', {}); save(); }
+    return { ran: false, blocked_reason: 'kill_switch_on' };
+  }
+  const normIn = normalizeArabic(inbound.text || '');
+  const exact = [], contains = [], buttons = [], firsts = [], hours = [];
+  for (const w of candidates) {
+    const tt = w.trigger_type;
+    if (tt === 'keyword') {
+      const k = keywordMatchKind(w.trigger_value, normIn);
+      if (k === 'exact') exact.push(w);
+      else if (k === 'contains') contains.push(w);
+    } else if (tt === 'button_reply' || tt === 'interactive_reply' || tt === 'list_reply') {
+      if (inbound.interactive) {
+        const tv = normalizeArabic(w.trigger_value);
+        if (tv && (normalizeArabic(inbound.interactive.title) === tv || normalizeArabic(inbound.interactive.id) === tv || normalizeArabic(inbound.interactive.title).includes(tv))) buttons.push(w);
+      }
+    } else if (tt === 'first_message' || tt === 'first') {
+      if (inbound.isFirst) firsts.push(w);
+    } else if (tt === 'business_hours') {
+      if (isBusinessHoursNow(w.trigger_value)) hours.push(w);
+    } else if (tt === 'away') {
+      if (!isBusinessHoursNow(w.trigger_value)) hours.push(w);
+    }
+  }
+  const byLength = (a, b) => normalizeArabic(b.trigger_value || '').length - normalizeArabic(a.trigger_value || '').length;
+  exact.sort(byLength); contains.sort(byLength);
+  const winner = exact[0] || contains[0] || buttons[0] || firsts[0] || hours[0] || null;
+  if (winner) {
+    conv.automation_unknown_count = 0;
+    return runAutomation(conv, winner, { inboundText: inbound.text || '' });
+  }
+  // No match: count unknowns; fallback fires on the 2nd unknown.
+  conv.automation_unknown_count += 1;
+  if (conv.automation_unknown_count >= 2) {
+    const fallbacks = candidates.filter((w) => w.trigger_type === 'fallback');
+    conv.automation_unknown_count = 0;
+    if (fallbacks.length) return runAutomation(conv, fallbacks[0], { inboundText: inbound.text || '' });
+    save(); return { ran: false, blocked_reason: 'no_fallback' };
+  }
+  save(); return { ran: false, blocked_reason: 'no_match' };
+}
+async function runContractEventAutomation(contract, newState) {
+  const convs = db.conversations.filter((c) => c.contract_id === contract.id);
+  const results = [];
+  for (const conv of convs) {
+    convAutomationState(conv);
+    if (conv.automation_handed_off) continue;
+    for (const w of allAutomationCandidates()) {
+      const tt = w.trigger_type;
+      if (tt !== 'contract_event' && tt !== 'contract-event') continue;
+      const tv = String(w.trigger_value || '').trim();
+      if (tv !== newState && tv !== 'state:' + newState) continue;
+      results.push(await runAutomation(conv, w, { inboundText: '' }));
+    }
+  }
+  return results;
+}
+// --- File upload helpers (Node built-ins only) ---
+function sanitizeFilename(name) {
+  let base = String(name || '').split(/[\\/]/).pop() || 'file';
+  base = base.replace(/[^A-Za-z0-9._-]/g, '_').replace(/\.+/g, '.').replace(/^[^A-Za-z0-9]+/, '');
+  if (!base || base === '.' || base === '..') base = 'file';
+  const dot = base.lastIndexOf('.');
+  if (dot > 0) {
+    const ext = base.slice(dot); const stem = base.slice(0, dot).slice(0, 80);
+    base = (stem || 'file') + ext;
+  } else base = base.slice(0, 100);
+  return base;
+}
+function parseMultipart(buffer, boundary) {
+  const fields = {}; const files = [];
+  const sep = Buffer.from('--' + boundary);
+  let idx = 0;
+  while (true) {
+    const start = buffer.indexOf(sep, idx);
+    if (start === -1) break;
+    let pos = start + sep.length;
+    if (buffer.slice(pos, pos + 2).toString() === '--') break;
+    if (buffer.slice(pos, pos + 2).toString() === '\r\n') pos += 2;
+    const headerEnd = buffer.indexOf('\r\n\r\n', pos);
+    if (headerEnd === -1) break;
+    const headers = buffer.slice(pos, headerEnd).toString('utf8');
+    const dataStart = headerEnd + 4;
+    const dataEnd = buffer.indexOf(sep, dataStart);
+    if (dataEnd === -1) break;
+    let data = buffer.slice(dataStart, dataEnd);
+    if (data.length >= 2 && data[data.length - 2] === 13 && data[data.length - 1] === 10) data = data.slice(0, data.length - 2);
+    const nameMatch = headers.match(/name="([^"]*)"/);
+    const fileMatch = headers.match(/filename="([^"]*)"/);
+    const typeMatch = headers.match(/Content-Type:\s*([^\r\n]+)/i);
+    if (fileMatch) files.push({ fieldname: nameMatch ? nameMatch[1] : 'file', filename: fileMatch[1], mime: typeMatch ? typeMatch[1].trim() : 'application/octet-stream', data });
+    else if (nameMatch) fields[nameMatch[1]] = data.toString('utf8');
+    idx = dataEnd;
+  }
+  return { fields, files };
+}
+// Upload a local file buffer to Meta to obtain a media ID (multipart,
+// built by hand — no dependency). Returns {ok, media_id} or {ok:false}.
+function metaUploadMedia(buffer, filename, mime) {
+  return new Promise((resolve) => {
+    const cfg = metaConfig();
+    const boundary = '----PilotMedia' + crypto.randomBytes(8).toString('hex');
+    const parts = [];
+    const field = (name, value) => parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
+    field('messaging_product', 'whatsapp');
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${mime}\r\n\r\n`));
+    parts.push(buffer);
+    parts.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+    const bodyBuf = Buffer.concat(parts);
+    let url;
+    try { url = new URL(`${cfg.base}/${cfg.version}/${cfg.phoneId}/media`); } catch { return resolve({ ok: false, error: 'meta request failed' }); }
+    const lib = url.protocol === 'http:' ? require('http') : require('https');
+    const headers = { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': bodyBuf.length };
+    if (cfg.token) headers.Authorization = 'Bearer ' + cfg.token;
+    const rq = lib.request(url, { method: 'POST', headers, timeout: 30000 }, (resp) => {
+      let data = '';
+      resp.on('data', (c) => { data += c; });
+      resp.on('end', () => {
+        let parsed = null; try { parsed = data ? JSON.parse(data) : null; } catch {}
+        if (resp.statusCode >= 200 && resp.statusCode < 300 && parsed && parsed.id) resolve({ ok: true, media_id: parsed.id });
+        else resolve({ ok: false, ...metaErrorInfo(parsed) });
+      });
+    });
+    rq.on('timeout', () => { rq.destroy(); resolve({ ok: false, error: 'meta upload timed out' }); });
+    rq.on('error', () => resolve({ ok: false, error: 'meta upload failed' }));
+    rq.write(bodyBuf); rq.end();
+  });
+}
+function publicUpload(u) {
+  if (!u) return null;
+  return { id: u.id, filename: u.sanitized_filename, stored_filename: u.stored_filename, mime_type: u.mime_type, kind: u.kind, size_bytes: u.size_bytes, media_id: u.media_id || null, conversation_id: u.conversation_id || null, uploaded_by: u.uploaded_by, dry_run: !!u.dry_run, created_at: u.created_at };
+}
+// Stage B upload handler (raw multipart body; called before JSON parsing).
+async function handleWhatsAppUpload(req, res, p, user, actor) {
+  const forbidden = () => send(res, 403, { error: 'forbidden — لا صلاحية لديك لعرض هذا القسم' }, p);
+  if (!can(user, 'whatsapp', 'edit')) return forbidden();
+  const ct = req.headers['content-type'] || '';
+  const bm = ct.match(/multipart\/form-data;\s*boundary=(.+)/);
+  if (!bm) return send(res, 400, { error: 'content-type must be multipart/form-data' }, p);
+  const boundary = bm[1].replace(/^"|"$/g, '');
+  const { raw, tooLarge } = await readRawBody(req, UPLOAD_MAX_BYTES + 1024 * 1024);
+  if (tooLarge) return send(res, 413, { error: 'upload too large (max 16 MB file)' }, p);
+  const { fields, files } = parseMultipart(raw, boundary);
+  const file = files[0];
+  if (!file) return send(res, 400, { error: 'file is required' }, p);
+  if (file.data.length > UPLOAD_MAX_BYTES) return send(res, 413, { error: 'file too large (max 16 MB)' }, p);
+  if (file.data.length === 0) return send(res, 400, { error: 'file is empty' }, p);
+  const sanitized = sanitizeFilename(file.filename);
+  const ext = '.' + sanitized.split('.').pop().toLowerCase();
+  const allowed = UPLOAD_ALLOWED[ext];
+  if (!allowed) return send(res, 400, { error: 'unsupported file type' }, p);
+  // MIME must match the extension family (prevents renaming an .exe to .png).
+  const mimeFamily = allowed.mime.split('/')[0];
+  if (file.mime.split('/')[0] !== mimeFamily && !(allowed.kind === 'document' && ['application', 'text'].includes(file.mime.split('/')[0]))) {
+    return send(res, 400, { error: 'unsupported file type (mime does not match extension)' }, p);
+  }
+  try { fs.mkdirSync(UPLOAD_DIR, { recursive: true }); } catch {}
+  const stored = Date.now() + '-' + crypto.randomBytes(4).toString('hex') + '-' + sanitized;
+  const fullPath = path.join(UPLOAD_DIR, stored);
+  fs.writeFileSync(fullPath, file.data);
+  let conv = null; let phone = null;
+  if (fields.conversation_id) conv = db.conversations.find((c) => c.id === Number(fields.conversation_id)) || null;
+  if (fields.to) { phone = fields.to; if (!conv) conv = conversationForPhone(phone, true); }
+  if (conv && !phone) phone = phoneForConversation(conv);
+  const rec = { id: nextId(), sanitized_filename: sanitized, stored_filename: stored, mime_type: allowed.mime, kind: allowed.kind, size_bytes: file.data.length, media_id: null, conversation_id: conv ? conv.id : null, uploaded_by: actor, dry_run: false, created_at: new Date().toISOString() };
+  db.uploads.push(rec);
+  const sendRequested = !!(phone || conv);
+  if (sendRequested) {
+    if (db.killSwitch) { try { fs.unlinkSync(fullPath); } catch {} db.uploads = db.uploads.filter((x) => x.id !== rec.id); audit(actor, 'whatsapp_upload', rec.id, 'whatsapp_upload_blocked_kill_switch', {}); save(); return send(res, 400, { error: 'kill_switch_on — الإرسال موقوف بمفتاح الإيقاف' }, p); }
+    if (!within24h(lastInboundAtForPhone(phone))) {
+      // File is KEPT (it can be sent later by media ID or after a template
+      // re-opens the window); only the send is refused now.
+      audit(actor, 'whatsapp_upload', rec.id, 'whatsapp_upload_kept_window_closed', { conversation_id: conv ? conv.id : null }); save();
+      return send(res, 400, { error: 'outside_24h_window_use_template', upload: publicUpload(rec) }, p);
+    }
+  }
+  const cfg = metaConfig();
+  if (cfg.configured) {
+    const up = await metaUploadMedia(file.data, sanitized, allowed.mime);
+    if (!up.ok) {
+      audit(actor, 'whatsapp_upload', rec.id, 'whatsapp_media_upload_failed', { meta_error_code: up.meta_error_code || null }); save();
+      return send(res, 502, { ok: false, error: up.error || 'meta upload failed', meta_error_code: up.meta_error_code || null, upload: publicUpload(rec) }, p);
+    }
+    rec.media_id = up.media_id;
+    if (sendRequested) {
+      const r = await metaRequest('POST', `/${cfg.phoneId}/messages`, { messaging_product: 'whatsapp', to: phoneKey(phone), type: allowed.kind, [allowed.kind]: { id: up.media_id, ...(fields.caption ? { caption: fields.caption } : {}) } });
+      if (!r.ok) { audit(actor, 'whatsapp_upload', rec.id, 'whatsapp_media_send_failed', { meta_error_code: r.meta_error_code || null }); save(); return send(res, 502, { ok: false, error: r.error || 'meta request failed', meta_error_code: r.meta_error_code || null, upload: publicUpload(rec) }, p); }
+      const wamid = r.data && r.data.messages && r.data.messages[0] ? r.data.messages[0].id : null;
+      const m = { id: nextId(), conversation_id: conv.id, direction: 'out', sender_phone: null, to_phone: normPhone(phone), body: fields.caption || null, template_name: null, media_type: allowed.kind, media_id: up.media_id, wamid, meta_status: 'sent', dry_run: false, created_at: new Date().toISOString() };
+      db.messages.push(m); audit(actor, 'message', m.id, 'whatsapp_media_sent', { conversation_id: conv.id, wamid, upload_id: rec.id }); save();
+      return send(res, 200, { ok: true, dry_run: false, configured: true, wamid, upload: publicUpload(rec), message: m }, p);
+    }
+    audit(actor, 'whatsapp_upload', rec.id, 'whatsapp_media_uploaded', { media_id: up.media_id }); save();
+    return send(res, 201, { ok: true, dry_run: false, configured: true, upload: publicUpload(rec) }, p);
+  }
+  // Dry-run: file stored locally, message recorded locally, never claimed sent.
+  rec.dry_run = true;
+  if (sendRequested && conv) {
+    const m = { id: nextId(), conversation_id: conv.id, direction: 'out', sender_phone: null, to_phone: normPhone(phone), body: fields.caption || null, template_name: null, media_type: allowed.kind, media_id: null, wamid: null, meta_status: null, dry_run: true, created_at: new Date().toISOString() };
+    db.messages.push(m); audit(actor, 'message', m.id, 'whatsapp_media_send_dry_run', { conversation_id: conv.id, upload_id: rec.id }); save();
+    return send(res, 200, { ok: true, dry_run: true, configured: false, upload: publicUpload(rec), message: m }, p);
+  }
+  audit(actor, 'whatsapp_upload', rec.id, 'whatsapp_media_stored_dry_run', {}); save();
+  return send(res, 201, { ok: true, dry_run: true, configured: false, upload: publicUpload(rec) }, p);
+}
+
 function seedTemplates() {
   let changed = false;
   if (!db.templates.length) {
     const names = ['contract_created','invite_accept','contract_accepted','payment_request','payment_confirmed_fi','preparing','delivery_confirmed','transaction_closed','dispute_opened','handover_support'];
-    names.forEach((n) => db.templates.push({ id: nextId(), name: n, label_ar: TEMPLATE_LABELS_AR[n] || n, language: 'ar', category: 'UTILITY', approval_status: 'pending', meta_status: 'not_submitted' }));
+    names.forEach((n) => db.templates.push({ id: nextId(), name: n, label_ar: TEMPLATE_LABELS_AR[n] || n, language: 'ar', category: 'UTILITY', body: null, header_type: null, header_text: null, header_link: null, footer: null, buttons: [], sample_values: [], approval_status: 'pending', meta_status: 'not_submitted', meta_template_id: null, rejection_reason: null }));
     changed = true;
   } else {
     for (const t of db.templates) {
@@ -447,6 +1203,14 @@ function seedTemplates() {
       // meta_status is Meta's view of the template; approval_status stays
       // the local (manual) field. Never overwrite one with the other.
       if (!t.meta_status) { t.meta_status = 'not_submitted'; changed = true; }
+      if (t.header_type === undefined) { t.header_type = null; changed = true; }
+      if (t.header_text === undefined) { t.header_text = null; changed = true; }
+      if (t.header_link === undefined) { t.header_link = null; changed = true; }
+      if (t.footer === undefined) { t.footer = null; changed = true; }
+      if (t.sample_values === undefined) { t.sample_values = []; changed = true; }
+      if (t.meta_template_id === undefined) { t.meta_template_id = null; changed = true; }
+      if (t.rejection_reason === undefined) { t.rejection_reason = null; changed = true; }
+      if (!Array.isArray(t.buttons)) { t.buttons = []; changed = true; }
     }
   }
   if (changed) save();
@@ -527,7 +1291,10 @@ const server = http.createServer(async (req, res) => {
             const mapped = mapMetaTemplateStatus(value.event || value.status);
             const tpl = db.templates.find((t) => t.name === value.message_template_name);
             if (tpl && mapped) {
-              tpl.meta_status = mapped; templateCount++;
+              tpl.meta_status = mapped;
+              if (mapped === 'rejected' && (value.reason || value.rejected_reason)) tpl.rejection_reason = String(value.reason || value.rejected_reason).slice(0, 500);
+              if (mapped === 'approved') tpl.rejection_reason = null;
+              templateCount++;
               audit('whatsapp-webhook', 'template', tpl.id, 'whatsapp_template_status', { meta_status: mapped, event: value.event || null });
             }
             continue;
@@ -538,23 +1305,35 @@ const server = http.createServer(async (req, res) => {
               if (!m || !m.id || !m.from) continue;
               if (db.messages.some((x) => x.wamid === m.id)) continue; // dedup on wamid
               const conv = conversationForPhone(m.from, true);
-              let text = null, mediaType = null;
+              // Stage B: first-message detection must use the count BEFORE
+              // this message is stored.
+              const priorInbound = db.messages.filter((x) => x.conversation_id === conv.id && x.direction === 'in').length;
+              let text = null, mediaType = null, mediaId = null, mediaCaption = null, mediaFilename = null, interactive = null;
               if (m.type === 'text') text = (m.text && m.text.body) || null;
               else if (['image', 'video', 'audio', 'document'].includes(m.type)) {
                 mediaType = m.type;
-                text = (m[m.type] && m[m.type].caption) || `[${m.type}]`;
+                mediaId = (m[m.type] && m[m.type].id) || null;
+                mediaCaption = (m[m.type] && m[m.type].caption) || null;
+                mediaFilename = (m[m.type] && m[m.type].filename) || null;
+                text = mediaCaption || `[${m.type}]`;
               } else if (m.type === 'interactive') {
                 const r = m.interactive || {};
-                text = (r.button_reply && r.button_reply.title) || (r.list_reply && r.list_reply.title) || '[interactive]';
+                const rep = r.button_reply || r.list_reply || {};
+                interactive = { id: rep.id || null, title: rep.title || null };
+                text = rep.title || '[interactive]';
               } else if (m.type === 'sticker') { mediaType = 'sticker'; text = '[sticker]'; }
               else continue; // unknown message type: ignore safely
               const ts = m.timestamp ? new Date(Number(m.timestamp) * 1000).toISOString() : new Date().toISOString();
-              const msg = { id: nextId(), conversation_id: conv.id, direction: 'in', sender_phone: normPhone(m.from), body: text, media_type: mediaType, wamid: m.id, meta_status: null, created_at: ts };
+              const msg = { id: nextId(), conversation_id: conv.id, direction: 'in', sender_phone: normPhone(m.from), body: text, media_type: mediaType, media_id: mediaId, media_caption: mediaCaption, media_filename: mediaFilename, interactive_reply_id: interactive ? interactive.id : null, interactive_reply_title: interactive ? interactive.title : null, wamid: m.id, meta_status: null, created_at: ts };
               db.messages.push(msg);
               conv.unread_count = (conv.unread_count || 0) + 1;
               conv.last_inbound_at = ts;
               inCount++;
               audit('whatsapp-webhook', 'message', msg.id, 'whatsapp_inbound', { conversation_id: conv.id, wamid: m.id, type: m.type });
+              // Stage B: execute automation on this inbound (awaited, so
+              // the webhook response reflects the automation outcome and
+              // tests see the outbound message immediately after).
+              try { await runInboundAutomation(conv, { text, isFirst: priorInbound === 0, interactive, type: m.type }); } catch { /* automation never fails the webhook */ }
             }
           }
           // Delivery/read/failed statuses for outbound messages.
@@ -578,6 +1357,37 @@ const server = http.createServer(async (req, res) => {
     }
     save();
     return send(res, 200, { ok: true, messages: inCount, statuses: statusCount, templates: templateCount }, p);
+  }
+
+  // Stage B file upload: raw multipart body, handled BEFORE the JSON
+  // body parser (which would discard the file). Auth is verified here
+  // with the same token check as the /api block below.
+  if (p === '/api/whatsapp/upload' && req.method === 'POST') {
+    const auth = req.headers.authorization || '';
+    const mm = auth.match(/^Bearer\s+(.+)$/);
+    const payload = mm ? verifyToken(mm[1]) : null;
+    const upUser = payload ? db.users.find((u) => u.id === payload.sub) : null;
+    if (!upUser || upUser.is_active === false) return send(res, 401, { error: 'unauthorized' }, p);
+    return handleWhatsAppUpload(req, res, p, upUser, upUser.email);
+  }
+  // Stage B media download (binary, not JSON): same pre-JSON handling.
+  const uploadDownloadMatch = p.match(/^\/api\/whatsapp\/uploads\/(\d+)\/download$/);
+  if (uploadDownloadMatch && req.method === 'GET') {
+    const auth = req.headers.authorization || '';
+    const mm = auth.match(/^Bearer\s+(.+)$/);
+    const payload = mm ? verifyToken(mm[1]) : null;
+    const upUser = payload ? db.users.find((u) => u.id === payload.sub) : null;
+    if (!upUser || upUser.is_active === false) return send(res, 401, { error: 'unauthorized' }, p);
+    if (!can(upUser, 'whatsapp', 'view')) return send(res, 403, { error: 'forbidden — لا صلاحية لديك لعرض هذا القسم' }, p);
+    const rec = db.uploads.find((x) => x.id === Number(uploadDownloadMatch[1]));
+    if (!rec) return send(res, 404, { error: 'upload not found' }, p);
+    const fullPath = path.join(UPLOAD_DIR, path.basename(rec.stored_filename));
+    if (!fullPath.startsWith(UPLOAD_DIR)) return send(res, 400, { error: 'invalid path' }, p);
+    try {
+      const data = fs.readFileSync(fullPath);
+      res.writeHead(200, { 'Content-Type': rec.mime_type || 'application/octet-stream', 'Content-Disposition': 'attachment; filename="' + rec.sanitized_filename.replace(/"/g, '') + '"', ...securityHeaders(p) });
+      return res.end(data);
+    } catch { return send(res, 404, { error: 'file not found on disk' }, p); }
   }
 
   const hasBody = req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH';
@@ -656,6 +1466,7 @@ const server = http.createServer(async (req, res) => {
         waba_configured: !!cfg.wabaId,
         api_version: cfg.version,
         meta_configured: metaConfigured,
+        embedded_signup: { configured: cfg.embeddedConfigured, app_id_configured: cfg.embedded.app_id_configured, config_id_configured: cfg.embedded.config_id_configured, app_secret_configured: cfg.embedded.app_secret_configured },
         templates_total: db.templates.length,
         templates_approved: db.templates.filter((t) => t.approval_status === 'approved').length,
         templates_meta_approved: db.templates.filter((t) => t.meta_status === 'approved').length,
@@ -687,11 +1498,16 @@ const server = http.createServer(async (req, res) => {
       const toNorm = normPhone(body.to);
       const toMeta = phoneKey(body.to); // Meta wants international format, no '+'
       const isTemplate = !!body.template_name;
+      const cfg = metaConfig();
       let metaPayload = null;
       if (isTemplate) {
         const tpl = db.templates.find((t) => t.name === body.template_name);
         if (!tpl) return send(res, 400, { error: 'template_not_found' }, p);
         if (tpl.approval_status !== 'approved') return send(res, 400, { error: 'template_not_approved' }, p);
+        // FIX (Stage A): when Meta IS configured, local approval alone is
+        // NOT enough — Meta approval is also required. When Meta is NOT
+        // configured the send below is a dry-run, so local approval only.
+        if (cfg.configured && tpl.meta_status !== 'approved') return send(res, 400, { error: 'template_not_meta_approved' }, p);
         const components = [];
         if (Array.isArray(body.parameters) && body.parameters.length) {
           components.push({ type: 'body', parameters: body.parameters.map((v) => ({ type: 'text', text: String(v) })) });
@@ -720,7 +1536,6 @@ const server = http.createServer(async (req, res) => {
           metaPayload = { messaging_product: 'whatsapp', to: toMeta, type: kind, [kind]: { ...(media.link ? { link: media.link } : { id: media.id }), ...(body.body ? { caption: body.body } : {}) } };
         }
       }
-      const cfg = metaConfig();
       const conv = conversationForPhone(body.to, true);
       if (!cfg.configured) {
         const m = { id: nextId(), conversation_id: conv.id, direction: 'out', sender_phone: null, to_phone: toNorm, body: body.body || null, template_name: body.template_name || null, media_type: (body.media && body.media.type) || null, wamid: null, meta_status: null, dry_run: true, created_at: new Date().toISOString() };
@@ -743,9 +1558,109 @@ const server = http.createServer(async (req, res) => {
       if (body.category !== undefined && body.category !== 'UTILITY') return send(res, 400, { error: 'category must be UTILITY only — Marketing templates are not allowed' }, p);
       if (body.language !== undefined && body.language !== 'ar') return send(res, 400, { error: 'language must be ar' }, p);
       if (!body.body || !String(body.body).trim()) return send(res, 400, { error: 'body is required' }, p);
+      const vErr = validateTemplateInput(body);
+      if (vErr) return send(res, 400, { error: vErr }, p);
       if (db.templates.some((t) => t.name === body.name)) return send(res, 400, { error: 'template name already exists' }, p);
-      const t = { id: nextId(), name: body.name, label_ar: body.label_ar || body.name, language: 'ar', category: 'UTILITY', body: String(body.body), buttons: Array.isArray(body.buttons) ? body.buttons : [], approval_status: 'pending', meta_status: 'not_submitted', meta_template_id: null, created_at: new Date().toISOString() };
-      db.templates.push(t); audit(actor, 'template', t.id, 'whatsapp_template_created', { name: t.name }); return send(res, 201, t, p);
+      const t = { id: nextId(), name: body.name, label_ar: body.label_ar || body.name, language: 'ar', category: 'UTILITY', body: String(body.body), header_type: body.header_type || null, header_text: body.header_text ? String(body.header_text) : null, header_link: body.header_link ? String(body.header_link) : null, footer: body.footer ? String(body.footer) : null, buttons: normalizeTemplateButtons(body.buttons), sample_values: Array.isArray(body.sample_values) ? body.sample_values.map(String) : (Array.isArray(body.example_values) ? body.example_values.map(String) : []), approval_status: 'pending', meta_status: 'not_submitted', meta_template_id: null, rejection_reason: null, created_at: new Date().toISOString() };
+      db.templates.push(t); audit(actor, 'template', t.id, 'whatsapp_template_created', { name: t.name }); save(); return send(res, 201, t, p);
+    }
+    // ---- Embedded Signup: launch config (booleans + public params only) ----
+    if (p === '/api/whatsapp/embedded-signup/config' && req.method === 'GET') {
+      if (!can(user, 'whatsapp', 'view')) return forbidden();
+      const cfg = metaConfig();
+      return send(res, 200, { embedded_configured: cfg.embeddedConfigured, app_id_configured: cfg.embedded.app_id_configured, config_id_configured: cfg.embedded.config_id_configured, app_secret_configured: cfg.embedded.app_secret_configured, launch: cfg.embeddedConfigured ? embeddedLaunchParams(cfg) : null, api_version: cfg.version }, p);
+    }
+    // ---- Embedded Signup: code exchange, TESTED not persisted ----
+    // The exchanged token is used only in-process to call /me (and, when
+    // env WABA/phone IDs exist, a phone lookup) and is then discarded:
+    // it is NEVER returned, logged, audited, or written to data.json.
+    // Production: the operator copies the resulting WABA/Phone IDs into
+    // Render Environment Variables + Redeploy (free container file is
+    // ephemeral). See docs/zeromsg-linking.md.
+    if (p === '/api/whatsapp/embedded-signup/callback' && req.method === 'POST') {
+      if (!can(user, 'whatsapp', 'edit')) return forbidden();
+      const cfg = metaConfig();
+      if (!cfg.embeddedConfigured) {
+        audit(actor, 'whatsapp', 0, 'whatsapp_embedded_signup_not_configured');
+        return send(res, 400, { error: 'embedded_not_configured — set WHATSAPP_APP_ID, WHATSAPP_APP_SECRET and WHATSAPP_CONFIG_ID in hosting env' }, p);
+      }
+      if (!body.code || typeof body.code !== 'string') return send(res, 400, { error: 'code is required' }, p);
+      const code = body.code;
+      const redirectUri = body.redirect_uri ? String(body.redirect_uri) : null;
+      // 1) Exchange the short-lived code for a token (server-side only:
+      // the App Secret travels only in this server-to-Meta request).
+      let exUrl;
+      try {
+        exUrl = new URL(cfg.base + '/' + cfg.version + '/oauth/access_token');
+        exUrl.searchParams.set('client_id', cfg.appId);
+        exUrl.searchParams.set('client_secret', cfg.appSecret);
+        exUrl.searchParams.set('code', code);
+        if (redirectUri) exUrl.searchParams.set('redirect_uri', redirectUri);
+      } catch { return send(res, 502, { error: 'embedded exchange failed' }, p); }
+      const ex = await new Promise((resolve) => {
+        const lib = exUrl.protocol === 'http:' ? require('http') : require('https');
+        const rq = lib.request(exUrl, { method: 'GET', timeout: 10000 }, (resp) => {
+          let d = ''; resp.on('data', (c) => { d += c; }); resp.on('end', () => {
+            let parsed = null; try { parsed = d ? JSON.parse(d) : null; } catch {}
+            resolve(resp.statusCode >= 200 && resp.statusCode < 300 ? { ok: true, data: parsed } : { ok: false, ...metaErrorInfo(parsed) });
+          });
+        });
+        rq.on('timeout', () => { rq.destroy(); resolve({ ok: false, error: 'meta request timed out' }); });
+        rq.on('error', () => resolve({ ok: false, error: 'meta request failed' })); rq.end();
+      });
+      if (!ex.ok || !ex.data || !ex.data.access_token) {
+        audit(actor, 'whatsapp', 0, 'whatsapp_embedded_signup_exchange_failed', { meta_error_code: ex.meta_error_code || null });
+        return send(res, 502, { ok: false, error: ex.error || 'embedded exchange failed', meta_error_code: ex.meta_error_code || null }, p);
+      }
+      const exchanged = ex.data.access_token;
+      // 2) Validate the exchanged token via /me (read-only).
+      const me = await metaRequest('GET', '/me', null, exchanged);
+      if (!me.ok) {
+        audit(actor, 'whatsapp', 0, 'whatsapp_embedded_signup_validation_failed', { meta_error_code: me.meta_error_code || null });
+        return send(res, 502, { ok: false, error: me.error || 'token validation failed', meta_error_code: me.meta_error_code || null }, p);
+      }
+      // 3) Optional phone lookup when a WABA ID is already configured;
+      // failures here do not fail the test — env IDs are the fallback.
+      let displayName = (me.data && me.data.name) || null;
+      let phoneId = cfg.phoneId || null;
+      if (cfg.wabaId) {
+        const phones = await metaRequest('GET', '/' + cfg.wabaId + '/phone_numbers?fields=display_name&limit=10', null, exchanged);
+        const first = phones.ok && phones.data && Array.isArray(phones.data.data) ? phones.data.data[0] : null;
+        if (first) { if (first.display_name) displayName = first.display_name; if (first.id && !phoneId) phoneId = first.id; }
+      }
+      audit(actor, 'whatsapp', 0, 'whatsapp_embedded_signup_tested', { tested: true, persisted: false, has_waba: !!cfg.wabaId, has_phone: !!phoneId });
+      return send(res, 200, { ok: true, tested: true, persisted: false, meta_user_id: (me.data && me.data.id) || null, display_name: displayName, waba_id: cfg.wabaId || null, phone_number_id: phoneId, configured: { app_id_configured: true, config_id_configured: true, app_secret_configured: true, access_token_configured: !!cfg.token, phone_number_configured: !!cfg.phoneId, waba_configured: !!cfg.wabaId }, message: 'Token tested successfully and NOT persisted. For production, set the resulting IDs/token in Render Environment Variables and Redeploy.' }, p);
+    }
+    // ---- WhatsApp template: single GET (with preview + send gate) / draft edit ----
+    const waTplMatch = p.match(/^\/api\/whatsapp\/templates\/(\d+)$/);
+    if (waTplMatch) {
+      const t = db.templates.find((x) => x.id === Number(waTplMatch[1]));
+      if (!t) return send(res, 404, { error: 'template not found' }, p);
+      if (req.method === 'GET') {
+        if (!can(user, 'whatsapp', 'view')) return forbidden();
+        return send(res, 200, templatePublic(t, metaConfig().configured), p);
+      }
+      if (req.method === 'PUT' || req.method === 'PATCH') {
+        if (!can(user, 'whatsapp', 'edit')) return forbidden();
+        // Draft edit only: an approved/pending Meta template must not be
+        // silently diverged from Meta — submit a new version instead.
+        if (t.meta_status === 'approved' || t.meta_status === 'pending') return send(res, 400, { error: 'template_not_editable — template is approved or pending at Meta; create a new template version instead' }, p);
+        if (body.name !== undefined && body.name !== t.name) return send(res, 400, { error: 'name is immutable after creation' }, p);
+        if (body.category !== undefined && body.category !== 'UTILITY') return send(res, 400, { error: 'category must be UTILITY only' }, p);
+        if (body.language !== undefined && body.language !== 'ar') return send(res, 400, { error: 'language must be ar' }, p);
+        const vErr = validateTemplateInput(body);
+        if (vErr) return send(res, 400, { error: vErr }, p);
+        if (body.label_ar !== undefined) t.label_ar = body.label_ar || t.name;
+        if (body.header_type !== undefined) t.header_type = body.header_type;
+        if (body.header_text !== undefined) t.header_text = body.header_text ? String(body.header_text) : null;
+        if (body.header_link !== undefined) t.header_link = body.header_link ? String(body.header_link) : null;
+        if (body.body !== undefined) t.body = String(body.body);
+        if (body.footer !== undefined) t.footer = body.footer ? String(body.footer) : null;
+        if (body.buttons !== undefined) t.buttons = normalizeTemplateButtons(body.buttons);
+        if (body.sample_values !== undefined) t.sample_values = body.sample_values.map(String);
+        if (body.example_values !== undefined) t.sample_values = body.example_values.map(String);
+        audit(actor, 'template', t.id, 'whatsapp_template_draft_edited', { name: t.name }); save(); return send(res, 200, t, p);
+      }
     }
     const tplSubmitMatch = p.match(/^\/api\/whatsapp\/templates\/(\d+)\/submit$/);
     if (tplSubmitMatch && req.method === 'POST') {
@@ -758,7 +1673,11 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, { ok: true, dry_run: true, configured: false, message: 'Meta is not configured — template kept as not_submitted', template: t }, p);
       }
       if (!t.body) return send(res, 400, { error: 'template body is required before submission' }, p);
-      const components = [{ type: 'BODY', text: t.body }];
+      const components = [];
+      if (t.header_type === 'text' && t.header_text) components.push({ type: 'HEADER', format: 'TEXT', text: t.header_text });
+      else if (t.header_type) components.push({ type: 'HEADER', format: String(t.header_type).toUpperCase() });
+      components.push({ type: 'BODY', text: t.body, ...(Array.isArray(t.sample_values) && t.sample_values.length ? { example: { body_text: [t.sample_values] } } : {}) });
+      if (t.footer) components.push({ type: 'FOOTER', text: t.footer });
       if (Array.isArray(t.buttons) && t.buttons.length) components.push({ type: 'BUTTONS', buttons: t.buttons });
       const r = await metaRequest('POST', `/${cfg.wabaId}/message_templates`, { name: t.name, category: 'UTILITY', language: 'ar', components });
       if (!r.ok) {
@@ -777,7 +1696,7 @@ const server = http.createServer(async (req, res) => {
         audit(actor, 'whatsapp', 0, 'whatsapp_templates_sync_dry_run');
         return send(res, 200, { ok: true, dry_run: true, configured: false, message: 'Meta is not configured — local template states unchanged' }, p);
       }
-      const r = await metaRequest('GET', `/${cfg.wabaId}/message_templates?fields=name,status,category,language&limit=100`, null);
+      const r = await metaRequest('GET', `/${cfg.wabaId}/message_templates?fields=name,status,category,language,id&limit=100`, null);
       if (!r.ok) {
         audit(actor, 'whatsapp', 0, 'whatsapp_templates_sync_failed', { meta_error_code: r.meta_error_code || null });
         return send(res, 502, { ok: false, dry_run: false, meta_error_code: r.meta_error_code || null, error: r.error || 'meta request failed' }, p);
@@ -787,7 +1706,14 @@ const server = http.createServer(async (req, res) => {
       for (const row of rows) {
         const tpl = db.templates.find((t) => t.name === row.name);
         const mapped = mapMetaTemplateStatus(row.status);
-        if (tpl && mapped && tpl.meta_status !== mapped) { tpl.meta_status = mapped; updated++; }
+        if (!tpl) continue;
+        let changedRow = false;
+        if (mapped && tpl.meta_status !== mapped) { tpl.meta_status = mapped; changedRow = true; }
+        if (row.id && tpl.meta_template_id !== row.id) { tpl.meta_template_id = row.id; changedRow = true; }
+        const rej = row.rejected_reason || row.rejection_reason || null;
+        if (mapped === 'rejected' && rej && tpl.rejection_reason !== String(rej).slice(0, 500)) { tpl.rejection_reason = String(rej).slice(0, 500); changedRow = true; }
+        if (mapped === 'approved' && tpl.rejection_reason) { tpl.rejection_reason = null; changedRow = true; }
+        if (changedRow) updated++;
       }
       // approval_status is local and is NEVER overwritten by Meta status.
       audit(actor, 'whatsapp', 0, 'whatsapp_templates_synced', { updated, total_from_meta: rows.length }); save();
@@ -921,7 +1847,11 @@ const server = http.createServer(async (req, res) => {
       if (to === 'payment_confirmed' && !body.financial_reference) return send(res, 400, { error: 'payment_confirmed requires financial_reference from the financial institution' }, p);
       if (to === 'payment_confirmed') db.tasks.push({ id: nextId(), contract_id: c.id, title: 'تأكيد دفع بمرجع مؤسسة', type: 'financial', status: 'done', financial_reference: body.financial_reference, assigned_to: null, created_at: new Date().toISOString() });
       if (to === 'issued') db.tasks.push({ id: nextId(), contract_id: c.id, title: 'متابعة قبول الطرفين', type: 'followup', status: 'open', assigned_to: null, created_at: new Date().toISOString() });
-      c.state = to; audit(actor, 'contract', c.id, 'transition', { to, financial_reference: body.financial_reference || null }); return send(res, 200, c, p);
+      c.state = to; audit(actor, 'contract', c.id, 'transition', { to, financial_reference: body.financial_reference || null });
+      // Stage B: contract-event automations (awaited, money steps are
+      // re-checked inside runAutomation and never executed).
+      try { await runContractEventAutomation(c, to); } catch {}
+      return send(res, 200, c, p);
     }
     const contractAmendMatch = p.match(/^\/api\/contracts\/(\d+)\/amend$/);
     if (contractAmendMatch && req.method === 'POST') {
@@ -1172,6 +2102,122 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // ---- Stage C: contacts (contract-scoped only, whatsapp permission family) ----
+    // No broadcast route exists and none is added here: contacts are never
+    // an audience. Import deduplicates by phone and reports every row.
+    if (p === '/api/contacts' && req.method === 'GET') {
+      if (!can(user, 'whatsapp', 'view')) return forbidden();
+      let list = db.contacts.map(contactPublic);
+      if (url.searchParams.has('q')) {
+        const q = url.searchParams.get('q').trim().toLowerCase();
+        const qDigits = q.replace(/^\+/, '').replace(/[\s\-()]/g, '');
+        if (q) list = list.filter((c) => (c.name || '').toLowerCase().includes(q) || phoneKey(c.phone).includes(qDigits) || (c.labels || []).some((l) => l.toLowerCase().includes(q)));
+      }
+      if (url.searchParams.has('segment')) {
+        const seg = url.searchParams.get('segment').trim().toLowerCase();
+        if (seg) list = list.filter((c) => (c.labels || []).some((l) => l.toLowerCase() === seg));
+      }
+      if (url.searchParams.has('role')) {
+        const role = url.searchParams.get('role');
+        if (role === 'buyer' || role === 'seller') list = list.filter((c) => c.roles.includes(role));
+      }
+      if (url.searchParams.has('last_contact_after')) {
+        const after = url.searchParams.get('last_contact_after');
+        list = list.filter((c) => c.last_contact_at && c.last_contact_at >= after);
+      }
+      if (url.searchParams.has('last_contact_before')) {
+        const before = url.searchParams.get('last_contact_before');
+        list = list.filter((c) => c.last_contact_at && c.last_contact_at <= before);
+      }
+      if (url.searchParams.get('has_contract') === 'true') list = list.filter((c) => c.contracts.length > 0);
+      if (url.searchParams.get('has_contract') === 'false') list = list.filter((c) => c.contracts.length === 0);
+      if (url.searchParams.get('eligible') === 'true') list = list.filter((c) => c.utility_eligible);
+      if (url.searchParams.get('eligible') === 'false') list = list.filter((c) => !c.utility_eligible);
+      // Most recently contacted first; never-contacted contacts last.
+      list.sort((a, b) => {
+        if (a.last_contact_at && b.last_contact_at) return a.last_contact_at < b.last_contact_at ? 1 : -1;
+        if (a.last_contact_at) return -1;
+        if (b.last_contact_at) return 1;
+        return b.id - a.id;
+      });
+      return send(res, 200, list, p);
+    }
+    if (p === '/api/contacts' && req.method === 'POST') {
+      if (!can(user, 'whatsapp', 'edit')) return forbidden();
+      const badField = rejectUnknown(body, ['name', 'phone', 'labels', 'notes']);
+      if (badField) return send(res, 400, { error: badField }, p);
+      if (!body.phone || !validContactPhone(body.phone)) return send(res, 400, { error: 'phone is required and must be 7-15 digits (optional leading +)' }, p);
+      if (db.contacts.some((c) => phoneKey(c.phone) === phoneKey(body.phone))) return send(res, 409, { error: 'contact already exists for this phone' }, p);
+      const c = { id: nextId(), name: (body.name && String(body.name).trim()) || normPhone(body.phone), phone: normPhone(body.phone), labels: parseContactLabels(body.labels), notes: body.notes ? String(body.notes).slice(0, 1000) : null, created_at: new Date().toISOString() };
+      db.contacts.push(c); audit(actor, 'contact', c.id, 'contact_created', { phone: c.phone }); save(); return send(res, 201, contactPublic(c), p);
+    }
+    if (p === '/api/contacts/import' && req.method === 'POST') {
+      if (!can(user, 'whatsapp', 'edit')) return forbidden();
+      if (!body.csv || typeof body.csv !== 'string') return send(res, 400, { error: 'csv is required (CSV text with a phone column)' }, p);
+      const rows = parseCsv(body.csv);
+      if (rows.length < 2) return send(res, 400, { error: 'csv must contain a header row and at least one data row' }, p);
+      if (rows.length - 1 > 1000) return send(res, 400, { error: 'csv import is limited to 1000 data rows' }, p);
+      const header = rows[0].map((h) => String(h).trim().toLowerCase());
+      const col = (names) => { for (const n of names) { const i = header.indexOf(n); if (i !== -1) return i; } return -1; };
+      const phoneIdx = col(['phone', 'phone_number', 'mobile', 'رقم', 'الهاتف']);
+      if (phoneIdx === -1) return send(res, 400, { error: 'csv must contain a phone column (phone / phone_number / mobile)' }, p);
+      const nameIdx = col(['name', 'full_name', 'fullname', 'الاسم']);
+      const labelsIdx = col(['labels', 'label', 'segments', 'segment', 'التصنيفات']);
+      const notesIdx = col(['notes', 'note', 'ملاحظات']);
+      const seenInFile = new Set();
+      let created = 0, skipped = 0; const errors = []; const details = []; const createdIds = [];
+      rows.slice(1).forEach((r, i) => {
+        const line = i + 2; // header is line 1
+        const rawPhone = (r[phoneIdx] || '').trim();
+        if (!rawPhone || !validContactPhone(rawPhone)) { errors.push({ row: line, phone: rawPhone || null, status: 'error', reason: 'invalid or missing phone' }); details.push({ row: line, phone: rawPhone || null, status: 'error', reason: 'invalid or missing phone' }); return; }
+        const key = phoneKey(rawPhone);
+        if (seenInFile.has(key)) { skipped++; details.push({ row: line, phone: normPhone(rawPhone), status: 'skipped', reason: 'duplicate_in_file' }); return; }
+        seenInFile.add(key);
+        if (db.contacts.some((c) => phoneKey(c.phone) === key)) { skipped++; details.push({ row: line, phone: normPhone(rawPhone), status: 'skipped', reason: 'duplicate_existing' }); return; }
+        const c = { id: nextId(), name: (nameIdx !== -1 && r[nameIdx] && String(r[nameIdx]).trim()) || normPhone(rawPhone), phone: normPhone(rawPhone), labels: labelsIdx !== -1 ? parseContactLabels(r[labelsIdx] || '') : [], notes: notesIdx !== -1 && r[notesIdx] ? String(r[notesIdx]).slice(0, 1000) : null, created_at: new Date().toISOString() };
+        db.contacts.push(c); createdIds.push(c.id); created++;
+        details.push({ row: line, phone: c.phone, status: 'created', reason: null });
+      });
+      audit(actor, 'contact', 0, 'contacts_imported', { created, skipped, errors: errors.length });
+      save();
+      return send(res, 200, { ok: true, total: rows.length - 1, created, skipped, errors: errors.length, created_ids: createdIds, details, error_rows: errors }, p);
+    }
+    if (p === '/api/contacts/export' && req.method === 'GET') {
+      if (!can(user, 'whatsapp', 'view')) return forbidden();
+      const lines = [['name', 'phone', 'labels', 'notes', 'roles', 'last_contact_at', 'utility_eligible'].join(',')];
+      for (const c of db.contacts.map(contactPublic)) {
+        lines.push([csvEscape(c.name), csvEscape(c.phone), csvEscape((c.labels || []).join(',')), csvEscape(c.notes || ''), csvEscape((c.roles || []).join(',')), csvEscape(c.last_contact_at || ''), c.utility_eligible ? 'yes' : 'no'].join(','));
+      }
+      res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="contacts.csv"', ...securityHeaders(p) });
+      return res.end('\ufeff' + lines.join('\r\n'));
+    }
+    const contactSingleMatch = p.match(/^\/api\/contacts\/(\d+)$/);
+    if (contactSingleMatch) {
+      const c = db.contacts.find((x) => x.id === Number(contactSingleMatch[1]));
+      if (!c) return send(res, 404, { error: 'contact not found' }, p);
+      if (req.method === 'GET') {
+        if (!can(user, 'whatsapp', 'view')) return forbidden();
+        return send(res, 200, contactPublic(c), p);
+      }
+      if (req.method === 'PUT' || req.method === 'PATCH') {
+        if (!can(user, 'whatsapp', 'edit')) return forbidden();
+        const badField = rejectUnknown(body, ['name', 'phone', 'labels', 'notes']);
+        if (badField) return send(res, 400, { error: badField }, p);
+        if (body.phone !== undefined && !validContactPhone(body.phone)) return send(res, 400, { error: 'phone must be 7-15 digits (optional leading +)' }, p);
+        if (body.phone !== undefined && db.contacts.some((x) => x.id !== c.id && phoneKey(x.phone) === phoneKey(body.phone))) return send(res, 409, { error: 'contact already exists for this phone' }, p);
+        if (body.name !== undefined) c.name = String(body.name).trim() || c.name;
+        if (body.phone !== undefined) c.phone = normPhone(body.phone);
+        if (body.labels !== undefined) c.labels = parseContactLabels(body.labels);
+        if (body.notes !== undefined) c.notes = body.notes ? String(body.notes).slice(0, 1000) : null;
+        audit(actor, 'contact', c.id, 'contact_updated', { phone: c.phone }); save(); return send(res, 200, contactPublic(c), p);
+      }
+      if (req.method === 'DELETE') {
+        if (!can(user, 'whatsapp', 'edit')) return forbidden();
+        db.contacts = db.contacts.filter((x) => x.id !== c.id);
+        audit(actor, 'contact', c.id, 'contact_deleted', { phone: c.phone }); save(); return send(res, 200, { ok: true, deleted_id: c.id }, p);
+      }
+    }
+
     // ---- Automation rules + Kill Switch ----
     if (p === '/api/automation/rules' && req.method === 'GET') {
       if (!can(user, 'automation', 'view')) return forbidden();
@@ -1200,6 +2246,77 @@ const server = http.createServer(async (req, res) => {
       const r = db.rules.find((x) => x.id === Number(ruleSingleMatch[1]));
       if (!r) return send(res, 404, { error: 'automation rule not found' }, p);
       return send(res, 200, r, p);
+    }
+
+    // ---- Stage B: automation execution endpoints ----
+    const wfRunMatch = p.match(/^\/api\/workflows\/(\d+)\/run$/);
+    if (wfRunMatch && req.method === 'POST') {
+      if (!can(user, 'automation', 'edit')) return forbidden();
+      const w = db.workflows.find((x) => x.id === Number(wfRunMatch[1]));
+      if (!w) return send(res, 404, { error: 'workflow not found' }, p);
+      const conv = db.conversations.find((x) => x.id === Number(body.conversation_id));
+      if (!conv) return send(res, 400, { error: 'conversation_id is required' }, p);
+      if (hasBannedStep(w.steps)) return send(res, 400, { error: 'money steps are never allowed in a workflow: ' + BANNED_STEP_TYPES.join(', ') }, p);
+      const r = await runAutomation(conv, { ...w, _kind: 'workflow' }, { manual: true, inboundText: body.inbound_text || '' });
+      return send(res, 200, { ok: r.ran, ...r, workflow_id: w.id, conversation_id: conv.id }, p);
+    }
+    const ruleRunMatch = p.match(/^\/api\/automation\/rules\/(\d+)\/run$/);
+    if (ruleRunMatch && req.method === 'POST') {
+      if (!can(user, 'automation', 'edit')) return forbidden();
+      const r0 = db.rules.find((x) => x.id === Number(ruleRunMatch[1]));
+      if (!r0) return send(res, 404, { error: 'automation rule not found' }, p);
+      const conv = db.conversations.find((x) => x.id === Number(body.conversation_id));
+      if (!conv) return send(res, 400, { error: 'conversation_id is required' }, p);
+      if (hasBannedStep(r0.steps) || hasBannedStep(r0.actions)) return send(res, 400, { error: 'money steps are never allowed in an automation rule: ' + BANNED_STEP_TYPES.join(', ') }, p);
+      const r = await runAutomation(conv, { ...r0, _kind: 'rule' }, { manual: true, inboundText: body.inbound_text || '' });
+      return send(res, 200, { ok: r.ran, ...r, workflow_id: r0.id, conversation_id: conv.id }, p);
+    }
+    const convAutoMatch = p.match(/^\/api\/conversations\/(\d+)\/automation\/(handoff|resume)$/);
+    if (convAutoMatch && req.method === 'POST') {
+      if (!can(user, 'automation', 'edit')) return forbidden();
+      const conv = db.conversations.find((x) => x.id === Number(convAutoMatch[1]));
+      if (!conv) return send(res, 404, { error: 'conversation not found' }, p);
+      convAutomationState(conv);
+      if (convAutoMatch[2] === 'handoff') {
+        conv.automation_handed_off = true; conv.automation_waiting = null;
+        audit(actor, 'conversation', conv.id, 'automation_handoff_manual', {});
+      } else {
+        conv.automation_handed_off = false; conv.automation_waiting = null; conv.automation_unknown_count = 0; conv.automation_last_run = {}; conv.automation_recent_runs = [];
+        audit(actor, 'conversation', conv.id, 'automation_resumed', {});
+      }
+      save(); return send(res, 200, { ok: true, conversation_id: conv.id, handed_off: conv.automation_handed_off, waiting: conv.automation_waiting }, p);
+    }
+    const convAutoStateMatch = p.match(/^\/api\/conversations\/(\d+)\/automation$/);
+    if (convAutoStateMatch && req.method === 'GET') {
+      if (!can(user, 'automation', 'view')) return forbidden();
+      const conv = db.conversations.find((x) => x.id === Number(convAutoStateMatch[1]));
+      if (!conv) return send(res, 404, { error: 'conversation not found' }, p);
+      convAutomationState(conv);
+      return send(res, 200, { conversation_id: conv.id, handed_off: conv.automation_handed_off, waiting: conv.automation_waiting, unknown_count: conv.automation_unknown_count, labels: conv.labels }, p);
+    }
+    if (p === '/api/automation/logs' && req.method === 'GET') {
+      if (!can(user, 'automation', 'view')) return forbidden();
+      let list = db.automation_logs;
+      if (url.searchParams.has('conversation_id')) list = list.filter((x) => String(x.conversation_id) === url.searchParams.get('conversation_id'));
+      if (url.searchParams.has('workflow_id')) list = list.filter((x) => String(x.workflow_id) === url.searchParams.get('workflow_id'));
+      if (url.searchParams.has('outcome')) list = list.filter((x) => x.outcome === url.searchParams.get('outcome'));
+      return send(res, 200, list, p);
+    }
+    // ---- Stage B: uploads list + Meta media download link ----
+    if (p === '/api/whatsapp/uploads' && req.method === 'GET') {
+      if (!can(user, 'whatsapp', 'view')) return forbidden();
+      let list = db.uploads.map(publicUpload);
+      if (url.searchParams.has('conversation_id')) list = list.filter((x) => String(x.conversation_id) === url.searchParams.get('conversation_id'));
+      return send(res, 200, list, p);
+    }
+    const mediaUrlMatch = p.match(/^\/api\/whatsapp\/media\/([^/]+)$/);
+    if (mediaUrlMatch && req.method === 'GET') {
+      if (!can(user, 'whatsapp', 'view')) return forbidden();
+      const cfg = metaConfig();
+      if (!cfg.configured) return send(res, 200, { ok: true, configured: false, download_url: null, message: 'Meta is not configured — no download link available' }, p);
+      const r = await metaRequest('GET', '/' + encodeURIComponent(mediaUrlMatch[1]), null);
+      if (!r.ok) return send(res, 502, { ok: false, configured: true, meta_error_code: r.meta_error_code || null, error: r.error || 'meta request failed' }, p);
+      return send(res, 200, { ok: true, configured: true, media_id: mediaUrlMatch[1], download_url: (r.data && r.data.url) || null, mime_type: (r.data && r.data.mime_type) || null, file_size: (r.data && r.data.file_size) || null }, p);
     }
 
     // ---- Audit: GET only (any other method falls through to 404) ----

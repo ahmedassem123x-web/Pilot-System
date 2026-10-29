@@ -4,7 +4,7 @@ import { Badge, Card, Empty, Field, LocalNote, fmt, stateTone } from './componen
 import { IconChat, IconCheckSquare, IconDoc, IconInbox, IconPower, IconTemplate } from './icons';
 import {
   ACTION_AR, CHECKLIST, DEPARTMENTS, ROLE_AR, ROLES, SECTIONS_AR, SECTIONS_LIST, STATE_AR, TEMPLATE_AR, TRANSITIONS,
-  type AuditEntry, type Contract, type Conversation, type MeUser, type Message, type State, type Template, type User, type Workflow,
+  type AuditEntry, type Contact, type ContactImportReport, type Contract, type Conversation, type EmbeddedSignupConfig, type MeUser, type Message, type State, type Template, type User, type Workflow,
 } from './types';
 
 export function NoPermission() {
@@ -222,6 +222,7 @@ export function Inbox({ b, reload, me, sub }: { b: Bundle; reload: () => void; m
   const [sender, setSender] = useState('operator');
   const [msg, setMsg] = useState('');
   const [tick, setTick] = useState(0);
+  const canWhatsAppEdit = hasAction(me, 'whatsapp', 'edit');
   const assignees = local.assignees();
   const isMine = (c: Conversation) => !!me && (c.assigned_to === me.full_name || c.assigned_to === me.email || c.assigned_to === String(me.id));
   const convs = b.conversations.filter((c) => (party === 'all' || c.party === party) && (status === 'all' || c.status === status) && (sub !== 'assigned' || isMine(c)));
@@ -286,7 +287,7 @@ export function Inbox({ b, reload, me, sub }: { b: Bundle; reload: () => void; m
         </div>
         <div className="grid2">
           <Field label="المرسل"><input value={sender} onChange={(e) => setSender(e.target.value)} /></Field>
-          <Field label="قالب واتساب (اختياري)"><select value={template} onChange={(e) => setTemplate(e.target.value)}><option value="">رد حر بدون قالب</option>{b.templates.map((t) => <option key={t.id} value={t.name}>{TEMPLATE_AR[t.name] || t.name} ({t.approval_status})</option>)}</select></Field>
+          <Field label="قالب واتساب (اختياري)"><select value={template} onChange={(e) => setTemplate(e.target.value)}><option value="">رد حر بدون قالب</option>{b.templates.map((t) => <option key={t.id} value={t.name}>{TEMPLATE_AR[t.name] || t.name} (محلي: {t.approval_status}، Meta: {t.meta_status || '—'})</option>)}</select></Field>
         </div>
         <Field label="نص الرد"><textarea rows={3} value={body} onChange={(e) => setBody(e.target.value)} placeholder={template ? 'نص إضافي مع القالب (اختياري)' : 'اكتب الرد هنا…'} /></Field>
         <label className="check"><input type="checkbox" checked={internal} onChange={(e) => setInternal(e.target.checked)} /> ملاحظة داخلية فقط (is_internal_note) — تُحفظ في السجل ولا تُعامل كرسالة للعميل</label>
@@ -297,6 +298,12 @@ export function Inbox({ b, reload, me, sub }: { b: Bundle; reload: () => void; m
             setMsg(internal ? 'تم حفظ الملاحظة الداخلية.' : 'تم إرسال الرد.'); setBody(''); setTemplate(''); reload();
           } catch (err) { setMsg('خطأ: ' + (err as Error).message); }
         }}>{internal ? 'حفظ ملاحظة داخلية' : 'إرسال الرد'}</button>
+        <div className="btn-row">
+          <button className="btn ghost small" disabled={!canWhatsAppEdit} onClick={async () => { try { await api.handoffConversation(sel.id); setMsg('تم تحويل المحادثة لموظف — الأتمتة متوقفة حتى الاستئناف.'); reload(); } catch (err) { setMsg('خطأ: ' + (err as Error).message); } }}>تحويل لموظف (إيقاف الأتمتة)</button>
+          <button className="btn ghost small" disabled={!canWhatsAppEdit} onClick={async () => { try { await api.resumeAutomation(sel.id); setMsg('تم استئناف الأتمتة لهذه المحادثة.'); reload(); } catch (err) { setMsg('خطأ: ' + (err as Error).message); } }}>استئناف الأتمتة</button>
+        </div>
+        <h3>الوسائط المرفقة</h3>
+        <p className="muted">رفع الوسائط وإرسالها يعيش في واجهة «الوسائط» ضمن قسم واتساب فقط (وليس هنا أيضاً، حتى لا تتكرر أداة الرفع في أكثر من واجهة): افتح واتساب ← الوسائط، واختر هذه المحادثة هناك. رفع حقيقي حتى 16 ميجابايت؛ عند اكتمال الربط يُرفع الملف إلى Meta ويُرسل بمعرّف الوسائط، وقبل الربط يُحفظ محلياً كسجل تجريبي ولا يُدَّعى إرساله. الرسائل الحرة تتطلب نافذة 24 ساعة مفتوحة، وإلا استخدم قالباً أولاً. رفع الملفات يتطلب صلاحية تعديل واتساب (whatsapp:edit).</p>
         {msg && <p className="msg">{msg}</p>}
       </>}
     </Card>}
@@ -335,8 +342,31 @@ export function Templates({ b, reload, canEdit }: { b: Bundle; reload?: () => vo
   const metaTone = (s?: string) => s === 'approved' ? 'ok' as const : s === 'rejected' ? 'bad' as const : s === 'not_submitted' ? 'neutral' as const : 'warn' as const;
   const metaAr = (s?: string) => s === 'approved' ? 'معتمد لدى Meta' : s === 'rejected' ? 'مرفوض لدى Meta' : s === 'not_submitted' ? 'غير مقدَّم إلى Meta' : s === 'pending' ? 'قيد المراجعة لدى Meta' : 'حالة Meta غير معروفة';
   const [msg, setMsg] = useState('');
-  const [form, setForm] = useState({ name: '', body: '', buttons: '' });
+  const [q, setQ] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const filteredTemplates = b.templates.filter((t) => {
+    const hay = `${t.name} ${(TEMPLATE_AR[t.name] || '')} ${t.body || ''}`.toLowerCase();
+    if (q.trim() && !hay.includes(q.trim().toLowerCase())) return false;
+    if (statusFilter === 'sendable') return t.approval_status === 'approved' && t.meta_status === 'approved';
+    if (statusFilter === 'local_approved') return t.approval_status === 'approved';
+    if (statusFilter === 'meta_approved') return t.meta_status === 'approved';
+    if (statusFilter === 'not_submitted') return t.meta_status === 'not_submitted';
+    return true;
+  });
+  const [form, setForm] = useState({ name: '', body: '', buttons: '', header_type: '', header_text: '', header_link: '', footer: '', sample_values: '' });
   const [busy, setBusy] = useState(false);
+  const [editId, setEditId] = useState<number | null>(null);
+  const [editForm, setEditForm] = useState({ body: '', header_type: '', header_text: '', header_link: '', footer: '', buttons: '', sample_values: '' });
+  const previewOf = (t: Template) => String(t.body || '').replace(/\{\{(\d+)\}\}/g, (_, n) => (t.sample_values || [])[Number(n) - 1] || `[مثال ${n}]`);
+  const sendableOf = (t: Template) => t.approval_status === 'approved' && t.meta_status === 'approved';
+  async function startEdit(t: Template) {
+    setBusy(true); setMsg('');
+    try { const full = await api.getWhatsAppTemplate(t.id); setEditId(t.id);
+      setEditForm({ body: full.body || '', header_type: full.header_type || '', header_text: full.header_text || '', header_link: full.header_link || '', footer: full.footer || '', buttons: Array.isArray(full.buttons) ? (full.buttons as { title?: string }[]).map((x) => typeof x === 'string' ? x : (x.title || '')).join(', ') : '', sample_values: (full.sample_values || []).join(', ') });
+      if (full.preview) setMsg(`معاينة القالب «${t.name}»: ${full.preview}`); }
+    catch (err) { setMsg('خطأ في جلب القالب: ' + (err as Error).message); }
+    finally { setBusy(false); }
+  }
   async function submitToMeta(t: Template) {
     setBusy(true); setMsg('');
     try { const r = await api.submitWhatsAppTemplate(t.id);
@@ -358,29 +388,64 @@ export function Templates({ b, reload, canEdit }: { b: Bundle; reload?: () => vo
         <button className="btn" disabled={!canEdit || busy} onClick={syncFromMeta}>مزامنة من Meta</button>
         {!canEdit && <span className="muted">المزامنة والتقديم والإنشاء تتطلب صلاحية تعديل واتساب (whatsapp:edit).</span>}
       </div>
+      <div className="btn-row">
+        <input className="inline-input" placeholder="بحث بالاسم أو الوصف أو نص القالب" value={q} onChange={(e) => setQ(e.target.value)} />
+        <select className="inline-select" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <option value="all">كل الحالات</option><option value="sendable">قابلة للإرسال فقط</option>
+          <option value="local_approved">معتمدة محلياً</option><option value="meta_approved">معتمدة لدى Meta</option>
+          <option value="not_submitted">غير مقدَّمة إلى Meta</option>
+        </select>
+      </div>
       {b.templates.length === 0 ? <Empty text="لا قوالب — تُزرع القوالب العشرة تلقائياً عند أول تشغيل للخادم." /> :
-        <div className="table-wrap"><table><thead><tr><th>اسم القالب</th><th>الوصف</th><th>اللغة</th><th>الفئة</th><th>الحالة المحلية (LOCAL)</th><th>حالة Meta</th><th>نص القالب</th>{canEdit && <th>تحديث محلي / تقديم</th>}</tr></thead>
-        <tbody>{b.templates.map((t) => <tr key={t.id}><td><code>{t.name}</code></td><td>{TEMPLATE_AR[t.name] || '—'}</td><td>{t.language}</td><td>{t.category}</td>
+      filteredTemplates.length === 0 ? <Empty text="لا قوالب مطابقة للبحث أو التصفية الحالية." /> :
+        <div className="table-wrap"><table><thead><tr><th>اسم القالب</th><th>الوصف</th><th>اللغة</th><th>الفئة</th><th>الحالة المحلية (LOCAL)</th><th>حالة Meta</th><th>نص القالب</th><th>المعاينة (بقيم الأمثلة)</th><th>قابل للإرسال</th>{canEdit && <th>تحديث محلي / تقديم / تعديل مسودة</th>}</tr></thead>
+        <tbody>{filteredTemplates.map((t) => <tr key={t.id}><td><code>{t.name}</code></td><td>{TEMPLATE_AR[t.name] || '—'}</td><td>{t.language}</td><td>{t.category}</td>
           <td><Badge tone={localTone(t.approval_status)}>{localAr(t.approval_status)}</Badge></td>
           <td><Badge tone={metaTone(t.meta_status)}>{metaAr(t.meta_status)}</Badge>{t.rejection_reason ? <div className="small">سبب الرفض: {t.rejection_reason}</div> : null}</td>
-          <td>{t.body ? <span className="small">{t.body}</span> : <span className="muted">— لا نص محفوظ في الخادم —</span>}</td>
+          <td>{t.header_type ? <div className="small">ترويسة: {t.header_type}{t.header_text ? ` — ${t.header_text}` : ''}{t.header_link ? ` — ${t.header_link}` : ''}</div> : null}{t.body ? <span className="small">{t.body}</span> : <span className="muted">— لا نص محفوظ في الخادم —</span>}{t.footer ? <div className="small">تذييل: {t.footer}</div> : null}</td>
+          <td><span className="small">{t.body ? previewOf(t) : '—'}</span></td>
+          <td>{sendableOf(t) ? <Badge tone="ok">قابل للإرسال</Badge> : <><Badge tone="warn">غير قابل</Badge><div className="small">{t.approval_status !== 'approved' ? 'يحتاج اعتماداً محلياً' : 'يحتاج موافقة Meta (عند اتصال Meta)'}</div></>}</td>
           {canEdit && <td><select className="inline-select" value={t.approval_status} onChange={async (e) => {
             try { await api.updateTemplate(t.id, e.target.value); setMsg(`تم تحديث الحالة المحلية (فقط) لقالب ${t.name} إلى ${localAr(e.target.value)} — هذا لا يغيّر حالة Meta.`); reload?.(); }
             catch (err) { setMsg('خطأ: ' + (err as Error).message); }
           }}><option value="pending">بانتظار (محلي)</option><option value="approved">معتمد (محلي)</option><option value="rejected">مرفوض (محلي)</option></select>{' '}
-          <button className="btn small" disabled={busy} onClick={() => submitToMeta(t)}>تقديم إلى Meta</button></td>}</tr>)}</tbody></table></div>}
+          <button className="btn small" disabled={busy} onClick={() => submitToMeta(t)}>تقديم إلى Meta</button>{' '}
+          {(t.meta_status !== 'approved' && t.meta_status !== 'pending') && <button className="btn small ghost" disabled={busy} onClick={() => startEdit(t)}>تعديل المسودة</button>}</td>}</tr>)}</tbody></table></div>}
+      {canEdit && editId !== null && <Card title="تعديل مسودة قالب" sub="التعديل متاح فقط للمسودات غير المقدَّمة أو المرفوضة لدى Meta — القالب المعتمد أو قيد المراجعة لدى Meta لا يُعدَّل من هنا؛ أنشئ إصداراً جديداً بدلاً منه.">
+        <form className="grid2" onSubmit={async (e) => { e.preventDefault(); setBusy(true); try {
+          const buttons = editForm.buttons.split(',').map((x) => x.trim()).filter(Boolean);
+          const samples = editForm.sample_values.split(',').map((x) => x.trim()).filter(Boolean);
+          await api.updateWhatsAppTemplate(editId, { body: editForm.body.trim(), header_type: editForm.header_type || null, header_text: editForm.header_text.trim() || null, header_link: editForm.header_link.trim() || null, footer: editForm.footer.trim() || null, buttons, sample_values: samples });
+          setMsg('تم تعديل المسودة.'); setEditId(null); reload?.();
+        } catch (err) { setMsg('خطأ في تعديل المسودة: ' + (err as Error).message); } finally { setBusy(false); } }}>
+          <Field label="نص القالب"><textarea rows={4} required value={editForm.body} onChange={(e) => setEditForm({ ...editForm, body: e.target.value })} /></Field>
+          <Field label="نوع الترويسة"><select value={editForm.header_type} onChange={(e) => setEditForm({ ...editForm, header_type: e.target.value })}><option value="">بدون ترويسة</option><option value="text">نص</option><option value="image">صورة</option><option value="video">فيديو</option><option value="document">مستند</option></select></Field>
+          <Field label="نص الترويسة (عند نوع نص)"><input value={editForm.header_text} onChange={(e) => setEditForm({ ...editForm, header_text: e.target.value })} /></Field>
+          <Field label="رابط وسائط الترويسة (صورة/فيديو/مستند)"><input value={editForm.header_link} onChange={(e) => setEditForm({ ...editForm, header_link: e.target.value })} /></Field>
+          <Field label="تذييل (حتى 60 حرفاً)"><input value={editForm.footer} onChange={(e) => setEditForm({ ...editForm, footer: e.target.value })} /></Field>
+          <Field label="أزرار (عناوين مفصولة بفواصل، حتى 3)"><input value={editForm.buttons} onChange={(e) => setEditForm({ ...editForm, buttons: e.target.value })} /></Field>
+          <Field label="قيم أمثلة للمتغيرات (مفصولة بفواصل، بالترتيب)"><input value={editForm.sample_values} onChange={(e) => setEditForm({ ...editForm, sample_values: e.target.value })} /></Field>
+          <button className="btn" type="submit" disabled={busy}>حفظ تعديل المسودة</button>{' '}<button className="btn ghost" type="button" onClick={() => setEditId(null)}>إلغاء</button>
+        </form>
+      </Card>}
       {msg && <p className="msg">{msg}</p>}
     </Card>
     {canEdit && <Card title="إنشاء قالب جديد (مسودة محلية)" sub="يُنشأ كمسودة محلية بحالة Meta «غير مقدَّم» — لا يصبح قابلاً للإرسال خارج النافذة إلا بعد تقديمه وموافقة Meta عليه. لا توجد هنا أي بيانات سرية.">
       <form className="grid2" onSubmit={async (e) => { e.preventDefault(); if (!/^[a-z0-9_]+$/.test(form.name.trim())) { setMsg('اسم القالب: أحرف صغيرة وأرقام وشرطات سفلية فقط.'); return; } if (!form.body.trim()) { setMsg('أدخل نص القالب.'); return; } setBusy(true); try {
         const buttons = form.buttons.split(',').map((x) => x.trim()).filter(Boolean);
-        const t = await api.createWhatsAppTemplate({ name: form.name.trim(), category: 'UTILITY', language: 'ar', body: form.body.trim(), ...(buttons.length ? { buttons } : {}) });
-        setMsg(`تم إنشاء مسودة القالب «${t.name}» — حالة Meta: غير مقدَّم. قدّمه من الجدول أعلاه بعد مراجعة نصه.`); setForm({ name: '', body: '', buttons: '' }); reload?.();
+        const samples = form.sample_values.split(',').map((x) => x.trim()).filter(Boolean);
+        const t = await api.createWhatsAppTemplate({ name: form.name.trim(), category: 'UTILITY', language: 'ar', body: form.body.trim(), ...(buttons.length ? { buttons } : {}), ...(form.header_type ? { header_type: form.header_type } : {}), ...(form.header_text.trim() ? { header_text: form.header_text.trim() } : {}), ...(form.header_link.trim() ? { header_link: form.header_link.trim() } : {}), ...(form.footer.trim() ? { footer: form.footer.trim() } : {}), ...(samples.length ? { sample_values: samples } : {}) });
+        setMsg(`تم إنشاء مسودة القالب «${t.name}» — حالة Meta: غير مقدَّم. قدّمه من الجدول أعلاه بعد مراجعة نصه.`); setForm({ name: '', body: '', buttons: '', header_type: '', header_text: '', header_link: '', footer: '', sample_values: '' }); reload?.();
       } catch (err) { setMsg('خطأ في إنشاء القالب: ' + (err as Error).message + ' — إذا كان الخادم لا يوفّر هذا الـ endpoint بعد، فالواجهة جاهزة والخادم ما زال قيد التنفيذ.'); } finally { setBusy(false); } }}>
         <Field label="اسم القالب (أحرف صغيرة وأرقام و_ فقط)"><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="مثال: order_update" /></Field>
         <Field label="الفئة (ثابتة)"><input disabled value="UTILITY — إشعار معاملة (Utility)" /></Field>
         <Field label="اللغة (ثابتة)"><input disabled value="ar — العربية" /></Field>
         <Field label="أزرار (اختياري — عناوين مفصولة بفواصل)"><input value={form.buttons} onChange={(e) => setForm({ ...form, buttons: e.target.value })} placeholder="مثال: تأكيد، تواصل مع الدعم" /></Field>
+        <Field label="نوع الترويسة"><select value={form.header_type} onChange={(e) => setForm({ ...form, header_type: e.target.value })}><option value="">بدون ترويسة</option><option value="text">نص</option><option value="image">صورة</option><option value="video">فيديو</option><option value="document">مستند</option></select></Field>
+        <Field label="نص الترويسة (عند نوع نص)"><input value={form.header_text} onChange={(e) => setForm({ ...form, header_text: e.target.value })} /></Field>
+        <Field label="رابط وسائط الترويسة (صورة/فيديو/مستند)"><input value={form.header_link} onChange={(e) => setForm({ ...form, header_link: e.target.value })} /></Field>
+        <Field label="تذييل (حتى 60 حرفاً)"><input value={form.footer} onChange={(e) => setForm({ ...form, footer: e.target.value })} /></Field>
+        <Field label="قيم أمثلة للمتغيرات (مفصولة بفواصل، بالترتيب)"><input value={form.sample_values} onChange={(e) => setForm({ ...form, sample_values: e.target.value })} placeholder="مثال: PS-1001، 250" /></Field>
         <div style={{ gridColumn: '1 / -1' }}><Field label="نص القالب — استخدم {{1}} و{{2}}… للمتغيرات بالتسلسل، ولا تبدأ النص بمتغير ولا تنهِ به إن أمكن"><textarea rows={4} required value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} placeholder="مثال: تم إنشاء عقدك رقم {{1}} — سنبلغك عند تأكيد الدفع من المؤسسة المالية." /></Field></div>
         <button className="btn" type="submit" disabled={busy}>إنشاء مسودة محلية</button>
       </form>
@@ -398,19 +463,256 @@ export function Templates({ b, reload, canEdit }: { b: Bundle; reload?: () => vo
   </>;
 }
 
+/* ---------------- Stage C: Contacts (contract-scoped only) ---------------- */
+// No broadcast, no audience, no marketing: this address book only looks up
+// the conversations and contracts that already exist for a phone. Utility
+// eligibility is computed by the backend (prior inbound, or a template
+// message actually sent via Meta) — creating a contact never grants it.
+export function Contacts({ b, reload, me }: { b: Bundle; reload: () => void; me: MeUser | null }) {
+  const canEdit = hasAction(me, 'whatsapp', 'edit');
+  const [list, setList] = useState<Contact[]>([]);
+  const [q, setQ] = useState('');
+  const [segment, setSegment] = useState('all');
+  const [role, setRole] = useState('all');
+  const [lastContact, setLastContact] = useState('all');
+  const [selId, setSelId] = useState<number | null>(null);
+  const [detail, setDetail] = useState<Contact | null>(null);
+  const [msg, setMsg] = useState('');
+  const [form, setForm] = useState({ name: '', phone: '', labels: '', notes: '' });
+  const [editId, setEditId] = useState<number | null>(null);
+  const [editForm, setEditForm] = useState({ name: '', phone: '', labels: '', notes: '' });
+  const [csvText, setCsvText] = useState('');
+  const [report, setReport] = useState<ContactImportReport | null>(null);
+  const load = async () => {
+    try {
+      const params: Record<string, string> = {};
+      if (q.trim()) params.q = q.trim();
+      if (segment !== 'all') params.segment = segment;
+      if (role !== 'all') params.role = role;
+      if (lastContact === '7d') params.last_contact_after = new Date(Date.now() - 7 * 86400000).toISOString();
+      if (lastContact === '30d') params.last_contact_after = new Date(Date.now() - 30 * 86400000).toISOString();
+      setList(await api.contacts(params));
+    } catch { setList([]); }
+  };
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const segments = [...new Set(list.flatMap((c) => c.labels || []))];
+  const sel = detail || list.find((c) => c.id === selId) || null;
+  async function openDetail(c: Contact) {
+    setSelId(c.id);
+    try { setDetail(await api.getContact(c.id)); } catch { setDetail(c); }
+  }
+  async function submitCreate(e: React.FormEvent) {
+    e.preventDefault(); setMsg('');
+    if (!form.phone.trim()) { setMsg('رقم الهاتف مطلوب.'); return; }
+    try {
+      const c = await api.createContact({ name: form.name.trim() || undefined, phone: form.phone.trim(), labels: form.labels.split(',').map((x) => x.trim()).filter(Boolean), notes: form.notes.trim() || undefined });
+      setMsg(`تم إنشاء جهة الاتصال «${c.name}» (${c.phone}).`); setForm({ name: '', phone: '', labels: '', notes: '' }); load(); reload();
+    } catch (err) { setMsg('خطأ: ' + (err as Error).message); }
+  }
+  async function submitEdit(e: React.FormEvent) {
+    e.preventDefault(); setMsg('');
+    try {
+      const c = await api.updateContact(editId!, { name: editForm.name.trim() || undefined, phone: editForm.phone.trim() || undefined, labels: editForm.labels.split(',').map((x) => x.trim()).filter(Boolean), notes: editForm.notes.trim() || undefined });
+      setMsg(`تم تحديث جهة الاتصال «${c.name}».`); setEditId(null); setDetail(c); load(); reload();
+    } catch (err) { setMsg('خطأ: ' + (err as Error).message); }
+  }
+  async function doExport() {
+    try {
+      const text = await api.exportContacts();
+      const blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = 'contacts.csv'; a.click();
+      URL.revokeObjectURL(url); setMsg('تم تصدير جهات الاتصال كملف CSV.');
+    } catch (err) { setMsg('خطأ في التصدير: ' + (err as Error).message); }
+  }
+  async function doImport(e: React.FormEvent) {
+    e.preventDefault(); setMsg('');
+    if (!csvText.trim()) { setMsg('الصق نص CSV أولاً (صف ترويسة + صفوف).'); return; }
+    try {
+      const r = await api.importContacts(csvText);
+      setReport(r); setMsg(`نتيجة الاستيراد: أُنشئ ${r.created}، تُخطّي ${r.skipped} (مكرر)، أخطاء ${r.errors} من أصل ${r.total} صفاً.`); load(); reload();
+    } catch (err) { setMsg('خطأ في الاستيراد: ' + (err as Error).message); }
+  }
+  return <>
+    <div className="page-head"><h1>جهات الاتصال</h1><div className="btn-row"><button className="btn ghost" onClick={doExport}>تصدير CSV</button><button className="btn ghost" onClick={load}>تحديث</button></div></div>
+    <Card title="جهات الاتصال — مرتبطة بالعقود فقط" sub="دفتر عناوين لعملاء لهم عقود أو محادثات قائمة — ليس جمهوراً إعلانياً، ولا يوجد هنا أي إرسال جماعي أو بث تسويقي أبداً. الصلاحية: whatsapp:view للعرض، whatsapp:edit للإنشاء والتعديل والاستيراد.">
+      <p className="local-note">قاعدة أهلية رسائل Utility: جهة الاتصال تكون مؤهلة فقط إذا كان لها رسالة واردة سابقة، أو رسالة قالب أُرسلت فعلاً عبر Meta. إنشاء جهة الاتصال لا يمنح الأهلية، ولا ينشئ موافقة — وقواعد نافذة 24 ساعة والقوالب المعتمدة ما زالت تطبَّق على كل إرسال.</p>
+      <div className="btn-row">
+        <input className="inline-input" placeholder="بحث بالاسم أو الرقم أو التصنيف" value={q} onChange={(e) => setQ(e.target.value)} />
+        <select className="inline-select" value={segment} onChange={(e) => setSegment(e.target.value)}><option value="all">كل التصنيفات</option>{segments.map((s) => <option key={s} value={s}>{s}</option>)}</select>
+        <select className="inline-select" value={role} onChange={(e) => setRole(e.target.value)}><option value="all">كل الأدوار</option><option value="buyer">مشتري في عقد</option><option value="seller">بائع في عقد</option></select>
+        <select className="inline-select" value={lastContact} onChange={(e) => setLastContact(e.target.value)}><option value="all">كل تواريخ آخر تواصل</option><option value="7d">تواصل خلال 7 أيام</option><option value="30d">تواصل خلال 30 يوماً</option></select>
+        <button className="btn small" onClick={load}>بحث وتصفية</button>
+      </div>
+      {list.length === 0 ? <Empty text="لا جهات اتصال مطابقة — أنشئ جهة اتصال من النموذج أدناه، أو استوردها من CSV. لا تُزرع أي جهات اتصال تجريبية تلقائياً." /> :
+        <div className="table-wrap"><table><thead><tr><th>الاسم</th><th>الرقم</th><th>التصنيفات</th><th>دور العقد</th><th>آخر تواصل</th><th>أهلية Utility</th><th></th></tr></thead>
+        <tbody>{list.map((c) => <tr key={c.id}>
+          <td><b>{c.name}</b></td><td dir="ltr">{c.phone}</td><td>{(c.labels || []).join('، ') || '—'}</td>
+          <td>{c.roles.length ? c.roles.map((r) => r === 'buyer' ? 'مشتري' : 'بائع').join(' + ') : 'بدون عقد'}</td>
+          <td className="small">{fmt(c.last_contact_at)}</td>
+          <td>{c.utility_eligible ? <Badge tone="ok">{c.eligibility_basis === 'prior_inbound' ? 'مؤهل — رسالة واردة سابقة' : 'مؤهل — تفاعل قالب معتمد'}</Badge> : <Badge tone="warn">غير مؤهل — لا تواصل سابق</Badge>}</td>
+          <td><button className="btn small ghost" onClick={() => openDetail(c)}>التفاصيل</button></td>
+        </tr>)}</tbody></table></div>}
+      {msg && <p className="msg">{msg}</p>}
+    </Card>
+    {sel && <Card title={`تفاصيل: ${sel.name}`} sub={`الرقم: ${sel.phone} — الأهلية محسوبة من سجل التفاعل الفعلي، وليست إقراراً يدوياً.`}>
+      <p>الأدوار في العقود: {sel.roles.length ? sel.roles.map((r) => r === 'buyer' ? 'مشتري' : 'بائع').join('، ') : 'لا يوجد عقد مرتبط بهذا الرقم.'}</p>
+      <p>أهلية رسائل Utility: {sel.utility_eligible ? <Badge tone="ok">{sel.eligibility_basis === 'prior_inbound' ? 'مؤهل — رسالة واردة سابقة' : 'مؤهل — تفاعل قالب معتمد أُرسل عبر Meta'}</Badge> : <Badge tone="warn">غير مؤهل — لا رسالة واردة سابقة ولا تفاعل قالب مرسل عبر Meta</Badge>}</p>
+      <p className="small">آخر تواصل: {fmt(sel.last_contact_at)} — عدد الرسائل (دون الملاحظات الداخلية): {sel.message_count}</p>
+      {sel.contracts.length === 0 ? <Empty text="لا عقود مرتبطة بهذا الرقم — جهة الاتصال وحدها لا تنشئ عقداً." /> :
+        <div className="table-wrap"><table><thead><tr><th>العقد</th><th>الدور</th><th>الحالة</th></tr></thead>
+        <tbody>{sel.contracts.map((c) => <tr key={c.id}><td><b>{c.code}</b></td><td>{c.role === 'buyer' ? 'مشتري' : 'بائع'}</td><td><Badge tone={stateTone(c.state)}>{STATE_AR[c.state] || c.state}</Badge></td></tr>)}</tbody></table></div>}
+      {sel.conversations.length === 0 ? <Empty text="لا محادثات مرتبطة بهذا الرقم بعد." /> :
+        <div className="table-wrap"><table><thead><tr><th>المحادثة</th><th>الطرف</th><th>الحالة</th><th>غير مقروءة</th><th>آخر وارد</th></tr></thead>
+        <tbody>{sel.conversations.map((c) => <tr key={c.id}><td>{c.contract_id ? `عقد ${c.contract_id}` : 'محادثة عامة'}</td><td>{c.party === 'buyer' ? 'مشتري' : c.party === 'seller' ? 'بائع' : 'عام'}</td><td>{c.status}</td><td>{c.unread_count}</td><td className="small">{fmt(c.last_inbound_at)}</td></tr>)}</tbody></table></div>}
+      {sel.notes && <p className="muted">ملاحظات: {sel.notes}</p>}
+      {canEdit && <div className="btn-row">
+        <button className="btn small" onClick={() => { setEditId(sel.id); setEditForm({ name: sel.name, phone: sel.phone, labels: (sel.labels || []).join(', '), notes: sel.notes || '' }); }}>تعديل</button>
+        <button className="btn small danger" onClick={async () => { try { await api.deleteContact(sel.id); setMsg(`تم حذف جهة الاتصال «${sel.name}».`); setDetail(null); setSelId(null); load(); reload(); } catch (err) { setMsg('خطأ: ' + (err as Error).message); } }}>حذف</button>
+        <button className="btn small ghost" onClick={() => { setDetail(null); setSelId(null); }}>إغلاق التفاصيل</button>
+      </div>}
+      {!canEdit && <p className="muted">التعديل والحذف يتطلبان صلاحية تعديل واتساب (whatsapp:edit).</p>}
+    </Card>}
+    {canEdit && <Card title="إنشاء جهة اتصال" sub="الرقم مطلوب (7–15 رقماً، بعلامة + اختيارية). الرقم المكرر يُرفض — جهة اتصال واحدة لكل رقم.">
+      <form className="grid2" onSubmit={submitCreate}>
+        <Field label="الاسم"><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="إن تُرك فارغاً يُستخدم الرقم" /></Field>
+        <Field label="رقم الهاتف"><input dir="ltr" required value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="+967…" /></Field>
+        <Field label="التصنيفات (مفصولة بفواصل)"><input value={form.labels} onChange={(e) => setForm({ ...form, labels: e.target.value })} placeholder="مثال: عميل متكرر، أولوية" /></Field>
+        <Field label="ملاحظات"><input value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></Field>
+        <button className="btn" type="submit">إنشاء جهة الاتصال</button>
+      </form>
+    </Card>}
+    {canEdit && editId !== null && <Card title="تعديل جهة اتصال" sub="تغيير الرقم إلى رقم موجود مسبقاً يُرفض. التعديل لا يغيّر العقود أو المحادثات المرتبطة — تلك تُحسب من الرقم نفسه.">
+      <form className="grid2" onSubmit={submitEdit}>
+        <Field label="الاسم"><input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} /></Field>
+        <Field label="رقم الهاتف"><input dir="ltr" required value={editForm.phone} onChange={(e) => setEditForm({ ...editForm, phone: e.target.value })} /></Field>
+        <Field label="التصنيفات (مفصولة بفواصل)"><input value={editForm.labels} onChange={(e) => setEditForm({ ...editForm, labels: e.target.value })} /></Field>
+        <Field label="ملاحظات"><input value={editForm.notes} onChange={(e) => setEditForm({ ...editForm, notes: e.target.value })} /></Field>
+        <button className="btn" type="submit">حفظ التعديل</button>{' '}<button className="btn ghost" type="button" onClick={() => setEditId(null)}>إلغاء</button>
+      </form>
+    </Card>}
+    {canEdit && <Card title="استيراد CSV" sub="ترويسة مطلوبة فيها عمود phone (أو phone_number/mobile)، وأعمدة اختيارية name وlabels وnote. المكرر — داخل الملف أو موجود مسبقاً — يُتخطّى ولا يُنشأ مرتين، والصف غير الصالح يُبلَّغ عنه دون إيقاف بقية الملف. الاستيراد لا ينشئ جمهوراً ولا يفعّل أي إرسال.">
+      <form onSubmit={doImport}>
+        <Field label="نص CSV"><textarea rows={6} dir="ltr" value={csvText} onChange={(e) => setCsvText(e.target.value)} placeholder={'name,phone,labels,notes\nأحمد,+967700000101,عميل متكرر,ملاحظة'} /></Field>
+        <div className="btn-row">
+          <label className="btn ghost">اختيار ملف CSV<input type="file" accept=".csv,text/csv" hidden onChange={async (e) => { const f = e.target.files?.[0]; if (f) setCsvText(await f.text()); }} /></label>
+          <button className="btn" type="submit">استيراد</button>
+        </div>
+      </form>
+      {report && <>
+        <p>النتيجة: أُنشئ {report.created}، تُخطّي {report.skipped}، أخطاء {report.errors}، من أصل {report.total} صفاً.</p>
+        {report.details.length === 0 ? <Empty text="لا تفاصيل استيراد بعد." /> :
+          <div className="table-wrap"><table><thead><tr><th>الصف</th><th>الرقم</th><th>النتيجة</th><th>السبب</th></tr></thead>
+          <tbody>{report.details.map((d, i) => <tr key={i}><td>{d.row}</td><td dir="ltr">{d.phone || '—'}</td><td>{d.status === 'created' ? 'أُنشئ' : d.status === 'skipped' ? 'تُخطّي (مكرر)' : 'خطأ'}</td><td>{d.reason === 'duplicate_in_file' ? 'مكرر داخل الملف' : d.reason === 'duplicate_existing' ? 'موجود مسبقاً' : d.reason || '—'}</td></tr>)}</tbody></table></div>}
+      </>}
+    </Card>}
+    {!canEdit && <p className="muted">إنشاء جهات الاتصال وتعديلها واستيرادها يتطلب صلاحية تعديل واتساب (whatsapp:edit).</p>}
+  </>;
+}
+
+/* ---------------- Stage C: WhatsApp Media (uploads library + upload) ---------------- */
+// The ONLY place that owns file upload: the inbox no longer carries its own
+// picker (Stage B note moved here), so the upload tool is not duplicated.
+export function WhatsAppMedia({ b, reload, me }: { b: Bundle; reload: () => void; me: MeUser | null }) {
+  const canEdit = hasAction(me, 'whatsapp', 'edit');
+  const [uploads, setUploads] = useState<{ id: number; filename: string; mime_type: string; kind: string; size_bytes: number; media_id: string | null; conversation_id: number | null; uploaded_by: string; dry_run: boolean; created_at: string }[]>([]);
+  const [q, setQ] = useState('');
+  const [kind, setKind] = useState('all');
+  const [msg, setMsg] = useState('');
+  const [file, setFile] = useState<File | null>(null);
+  const [convId, setConvId] = useState<number | ''>('');
+  const [caption, setCaption] = useState('');
+  const [mediaId, setMediaId] = useState('');
+  const [mediaResult, setMediaResult] = useState('');
+  const load = async () => { try { setUploads(await api.whatsappUploads()); } catch { setUploads([]); } };
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const shown = uploads.filter((u) => (kind === 'all' || u.kind === kind) && (q.trim() === '' || u.filename.toLowerCase().includes(q.trim().toLowerCase())));
+  async function doUpload(e: React.FormEvent) {
+    e.preventDefault(); setMsg('');
+    if (!file) { setMsg('اختر ملفاً أولاً.'); return; }
+    try {
+      const r = await api.whatsappUpload(file, { ...(convId !== '' ? { conversation_id: Number(convId) } : {}), caption: caption || undefined });
+      setMsg(r.dry_run ? `تم حفظ الملف «${r.upload.filename}» محلياً (وضع تجريبي — لم يُرسل إلى واتساب بعد لأن الربط غير مكتمل).` : `تم إرسال الملف «${r.upload.filename}» عبر واتساب (معرّف وسائط من Meta).`);
+      setFile(null); setCaption(''); load(); reload();
+    } catch (err) { setMsg('خطأ في رفع الملف: ' + (err as Error).message); }
+  }
+  async function doDownload(u: { id: number; filename: string }) {
+    try {
+      const blob = await api.downloadUpload(u.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = u.filename; a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) { setMsg('خطأ في تنزيل الملف: ' + (err as Error).message); }
+  }
+  async function lookupMedia(e: React.FormEvent) {
+    e.preventDefault(); setMediaResult('');
+    try {
+      const r = await api.whatsappMediaUrl(mediaId.trim());
+      setMediaResult(!r.configured ? 'Meta غير موصول — لا يوجد رابط تنزيل متاح، والوسائط الواردة محفوظة كبيانات وصفية فقط.' : r.download_url ? `رابط التنزيل المؤقت من Meta: ${r.download_url}` : 'لم يُعد Meta رابط تنزيل لهذا المعرّف.');
+    } catch (err) { setMediaResult('خطأ: ' + (err as Error).message); }
+  }
+  return <>
+    <div className="page-head"><h1>الوسائط</h1><div className="btn-row"><button className="btn ghost" onClick={load}>تحديث</button></div></div>
+    <Card title="رفع ملف وإرساله عبر واتساب" sub="صورة/فيديو/مستند/صوتي حتى 16 ميجابايت لكل نوع، مع مطابقة الامتداد ونوع الملف. عند اكتمال الربط يُرفع الملف إلى Meta ويُرسل بمعرّف الوسائط؛ قبل الربط يُحفظ محلياً كسجل تجريبي ولا يُدَّعى إرساله. الرسائل الحرة تتطلب نافذة 24 ساعة مفتوحة، وإلا أرسل قالباً أولاً.">
+      {canEdit ? <form className="grid2" onSubmit={doUpload}>
+        <Field label="الملف"><input type="file" onChange={(e) => setFile(e.target.files?.[0] || null)} /></Field>
+        <Field label="المحادثة (اختياري — عند اختيارها يُرسل الملف إليها)"><select value={convId} onChange={(e) => setConvId(e.target.value ? Number(e.target.value) : '')}><option value="">حفظ فقط دون إرسال</option>{b.conversations.map((c) => <option key={c.id} value={c.id}>{c.id} — {c.party} {c.contract_id ? `عقد ${c.contract_id}` : 'عامة'}</option>)}</select></Field>
+        <Field label="تعليق (اختياري)"><input value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="تعليق مع الملف…" /></Field>
+        <button className="btn" type="submit" disabled={!file}>رفع الملف{convId !== '' ? ' وإرساله' : ''}</button>
+      </form> : <p className="muted">رفع الملفات يتطلب صلاحية تعديل واتساب (whatsapp:edit).</p>}
+      {msg && <p className="msg">{msg}</p>}
+    </Card>
+    <Card title="مكتبة الوسائط المرفوعة" sub="ملفات محفوظة على الخادم (backend/uploads) — المسار المخزَّن لا يُعرض أبداً، والتنزيل يتم عبر الرمز فقط.">
+      <div className="btn-row">
+        <input className="inline-input" placeholder="بحث باسم الملف" value={q} onChange={(e) => setQ(e.target.value)} />
+        <select className="inline-select" value={kind} onChange={(e) => setKind(e.target.value)}><option value="all">كل الأنواع</option><option value="image">صورة</option><option value="video">فيديو</option><option value="audio">صوتي</option><option value="document">مستند</option></select>
+      </div>
+      {uploads.length === 0 ? <Empty text="لا وسائط مرفوعة بعد — ارفع أول ملف من النموذج أعلاه." /> :
+      shown.length === 0 ? <Empty text="لا وسائط مطابقة للبحث أو التصفية الحالية." /> :
+        <div className="table-wrap"><table><thead><tr><th>اسم الملف</th><th>النوع</th><th>الحجم</th><th>معرّف Meta</th><th>المحادثة</th><th>وضع تجريبي</th><th></th></tr></thead>
+        <tbody>{shown.map((u) => <tr key={u.id}><td>{u.filename}</td><td>{u.kind}</td><td className="small">{u.size_bytes} بايت</td><td className="small">{u.media_id || '—'}</td><td>{u.conversation_id || '—'}</td><td>{u.dry_run ? 'نعم' : 'لا'}</td><td><button className="btn small ghost" onClick={() => doDownload(u)}>تنزيل</button></td></tr>)}</tbody></table></div>}
+    </Card>
+    <Card title="رابط تنزيل وسائط واردة من Meta" sub="الوسائط الواردة تُحفظ كبيانات وصفية فقط (المعرّف والتسمية)؛ الرابط المؤقت يُطلب من Meta عند الحاجة، ولا يُختلق رابط عند غياب الربط.">
+      <form className="grid2" onSubmit={lookupMedia}>
+        <Field label="معرّف الوسائط لدى Meta (media_id)"><input value={mediaId} onChange={(e) => setMediaId(e.target.value)} placeholder="مثال: 123456789…" /></Field>
+        <button className="btn" type="submit" disabled={!mediaId.trim()}>طلب رابط التنزيل</button>
+      </form>
+      {mediaResult && <p className="msg">{mediaResult}</p>}
+    </Card>
+  </>;
+}
+
 /* ---------------- Automation ---------------- */
 export function Automation({ b, reload, only }: { b: Bundle; reload: () => void; only?: 'rules' | 'killswitch' }) {
   const [msg, setMsg] = useState('');
   const [confirm, setConfirm] = useState(false);
   const [rules, setRules] = useState<AutomationRule[]>([]);
+  const [ruleQ, setRuleQ] = useState('');
+  const shownRules = rules.filter((r) => ruleQ.trim() === '' || `${r.name} ${r.trigger_value || ''} ${r.category}`.toLowerCase().includes(ruleQ.trim().toLowerCase()));
   const [ruleForm, setRuleForm] = useState({ name: '', category: 'general', trigger_value: '' });
   const loadRules = async () => { try { setRules(await api.automationRules()); } catch { setRules([]); } };
   useEffect(() => { loadRules(); }, []);
+  const [runWf, setRunWf] = useState<number | ''>('');
+  const [runConv, setRunConv] = useState<number | ''>('');
+  const [logs, setLogs] = useState<{ id: number; workflow_name: string | null; outcome: string; created_at: string }[]>([]);
   async function toggle(off: boolean) {
     try { await api.killSwitchSet(off); setMsg(off ? 'تم تفعيل مفتاح الإيقاف — الأتمتة موقوفة الآن.' : 'تم إيقاف مفتاح الإيقاف — الأتمتة تعمل.'); setConfirm(false); reload(); }
     catch (err) { setMsg('خطأ: ' + (err as Error).message); }
   }
   return <>
+    <Card title="تشغيل يدوي وسجل تنفيذ الأتمتة" sub="التشغيل اليدوي يتطلب صلاحية تعديل الأتمتة. التنفيذ الحقيقي يعمل على رسائل Webhook الواردة وأحداث العقود — هذه الواجهة للتشغيل اليدوي والمراجعة فقط.">
+      <div className="grid2">
+        <Field label="التدفق"><select value={runWf} onChange={(e) => setRunWf(e.target.value ? Number(e.target.value) : '')}><option value="">— اختر تدفقاً —</option>{b.workflows.map((w) => <option key={w.id} value={w.id}>{w.name} ({w.trigger_type})</option>)}</select></Field>
+        <Field label="المحادثة"><select value={runConv} onChange={(e) => setRunConv(e.target.value ? Number(e.target.value) : '')}><option value="">— اختر محادثة —</option>{b.conversations.map((c) => <option key={c.id} value={c.id}>{c.id} — {c.party} {c.contract_id ? `عقد ${c.contract_id}` : 'عامة'}</option>)}</select></Field>
+      </div>
+      <div className="btn-row">
+        <button className="btn" disabled={runWf === '' || runConv === ''} onClick={async () => { try { const r = await api.runWorkflow(Number(runWf), Number(runConv)); setMsg(r.ok ? `تم تنفيذ التدفق — النتيجة: ${r.outcome || 'done'}.` : `لم يُنفَّذ التدفق — السبب: ${r.blocked_reason || 'غير معروف'}.`); } catch (err) { setMsg('خطأ: ' + (err as Error).message); } }}>تشغيل يدوي الآن</button>
+        <button className="btn ghost" onClick={async () => { try { setLogs(await api.automationLogs(runConv === '' ? undefined : Number(runConv))); } catch { setLogs([]); } }}>عرض سجل التنفيذ</button>
+      </div>
+      {logs.length > 0 && <table><thead><tr><th>التدفق</th><th>النتيجة</th><th>الوقت</th></tr></thead><tbody>{logs.slice(-20).reverse().map((x) => <tr key={x.id}><td>{x.workflow_name || '—'}</td><td>{x.outcome}</td><td className="small">{fmt(x.created_at)}</td></tr>)}</tbody></table>}
+      <p className="muted">المشغّلات المدعومة: كلمة مفتاحية (مطابقة تامة قبل الاحتواء، والأطول يفوز، مع تطبيع عربي)، أول رسالة، رد زر/قائمة، حدث عقد، أثناء/خارج الدوام، احتياطي بعد رسالتين غير مفهومتين، وتشغيل يدوي. خطوات المال مرفوضة عند الحفظ وعند التنفيذ.</p>
+      {msg && <p className="msg">{msg}</p>}
+    </Card>
     {(!only || only === 'killswitch') && <Card title="مفتاح إيقاف الأتمتة (Kill Switch)" sub="يعمل فعلاً عبر الخادم: POST /api/automation/kill-switch — ويُسجَّل كل تبديل في سجل التدقيق.">
       <p>الحالة الحالية: {b.killSwitch ? <Badge tone="bad">مُفعّل — الأتمتة موقوفة</Badge> : <Badge tone="ok">متوقف — الأتمتة تعمل</Badge>}</p>
       {!confirm ? <button className={`btn ${b.killSwitch ? '' : 'danger'}`} onClick={() => setConfirm(true)}>{b.killSwitch ? 'إعادة تشغيل الأتمتة' : 'إيقاف الأتمتة فوراً'}</button> :
@@ -426,9 +728,11 @@ export function Automation({ b, reload, only }: { b: Bundle; reload: () => void;
         <Field label="قيمة المشغّل"><input value={ruleForm.trigger_value} onChange={(e) => setRuleForm({ ...ruleForm, trigger_value: e.target.value })} placeholder="مثال: عقد جديد" /></Field>
         <button className="btn" type="submit">إنشاء القاعدة</button>
       </form>
+      <div className="btn-row"><input className="inline-input" placeholder="بحث بالقاعدة أو المشغّل أو الفئة" value={ruleQ} onChange={(e) => setRuleQ(e.target.value)} /></div>
       {rules.length === 0 ? <Empty text="لا قواعد أتمتة بعد." /> :
+      shownRules.length === 0 ? <Empty text="لا قواعد مطابقة للبحث الحالي." /> :
         <table><thead><tr><th>القاعدة</th><th>الفئة</th><th>المشغّل</th><th>نشطة</th><th></th></tr></thead>
-        <tbody>{rules.map((r) => <tr key={r.id}><td>{r.name}</td><td>{r.category}</td><td>{r.trigger_value || '—'}</td><td>{r.is_active ? 'نعم' : 'لا'}</td>
+        <tbody>{shownRules.map((r) => <tr key={r.id}><td>{r.name}</td><td>{r.category}</td><td>{r.trigger_value || '—'}</td><td>{r.is_active ? 'نعم' : 'لا'}</td>
           <td><button className="btn small ghost" onClick={async () => { try { const u = await api.toggleRule(r.id); setMsg(`القاعدة «${u.name}» أصبحت ${u.is_active ? 'نشطة' : 'معطّلة'}.`); loadRules(); } catch (err) { setMsg('خطأ: ' + (err as Error).message); } }}>{r.is_active ? 'تعطيل' : 'تفعيل'}</button></td></tr>)}</tbody></table>}
       {msg && <p className="msg">{msg}</p>}
     </Card>}
@@ -615,7 +919,56 @@ const WIZARD_SPEC: { key: string; fallbackTitle: string; detail: string }[] = [
   { key: 'templates_approval', fallbackTitle: 'اعتماد القوالب لدى Meta', detail: 'القوالب العشرة Utility بالعربية. لا يُرسل أي قالب قبل اعتماده لدى Meta، ولا يُرسل قالب لأي شخص خارج علاقة الدعوة/العقد. راجع تبويب «القوالب» لحالتي كل قالب (المحلية وMeta).' },
 ];
 const LIVE_WEBHOOK_EXAMPLE = 'https://pilot-system-z5vc.onrender.com/api/whatsapp/webhook';
-export function WhatsApp({ b, reload, me, sub }: { b: Bundle; reload: () => void; me: MeUser | null; sub?: 'connection' | 'templates' | 'settings' | 'webhook' }) {
+/* ---------------- Embedded Signup (Stage A, official Meta flow only) ---------------- */
+// The button builds Meta's OAuth dialog URL from server-supplied public
+// parameters (App ID + Config ID). No secret is ever shown or sent to the
+// browser. After Meta redirects back, the operator pastes the short-lived
+// `code` here; the server exchanges it and TESTS the token — it does NOT
+// persist it (see docs/zeromsg-linking.md). Manual env setup stays available.
+export function EmbeddedSignupCard({ canEdit }: { canEdit: boolean }) {
+  const [cfg, setCfg] = useState<EmbeddedSignupConfig | null>(null);
+  const [code, setCode] = useState('');
+  const [redirectUri, setRedirectUri] = useState(typeof window !== 'undefined' ? window.location.origin + '/' : '');
+  const [result, setResult] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    api.embeddedSignupConfig().then(setCfg).catch(() => setCfg(null));
+    try { const c = new URLSearchParams(window.location.search).get('code'); if (c) setCode(c); } catch {}
+  }, []);
+  const launchUrl = cfg?.launch ? (() => {
+    const u = new URL(cfg.launch.dialog_base + cfg.launch.dialog_path);
+    u.searchParams.set('client_id', cfg.launch.client_id);
+    u.searchParams.set('config_id', cfg.launch.config_id);
+    u.searchParams.set('response_type', cfg.launch.response_type);
+    u.searchParams.set('override_default_response_type', 'true');
+    u.searchParams.set('scope', cfg.launch.scope);
+    u.searchParams.set('redirect_uri', redirectUri || (typeof window !== 'undefined' ? window.location.origin + '/' : ''));
+    return u.toString();
+  })() : null;
+  return <Card title="الربط من داخل اللوحة — Connect with Meta (Embedded Signup)" sub="تدفق Meta الرسمي فقط. لا يوجد هنا أي حقل لرمز أو سر، ولا يُعرض أي رمز أبداً. الرمز المتبادَل يُختبر فقط ولا يُحفظ.">
+    {!cfg ? <p className="muted">جارٍ جلب حالة Embedded Signup من الخادم…</p> : <>
+      <ul>
+        <li>معرّف التطبيق (App ID) مضبوط: {cfg.app_id_configured ? 'نعم' : 'لا'}</li>
+        <li>معرّف التكوين (Config ID) مضبوط: {cfg.config_id_configured ? 'نعم' : 'لا'}</li>
+        <li>سر التطبيق (App Secret) مضبوط: {cfg.app_secret_configured ? 'نعم' : 'لا'}</li>
+        <li>Embedded Signup جاهز: {cfg.embedded_configured ? 'نعم' : 'لا — اضبط WHATSAPP_APP_ID وWHATSAPP_CONFIG_ID وWHATSAPP_APP_SECRET في بيئة الاستضافة ثم أعد النشر، أو استخدم المسار اليدوي أدناه.'}</li>
+      </ul>
+      {launchUrl && <div className="btn-row"><a className="btn" href={launchUrl} target="_blank" rel="noreferrer">Connect with Meta — فتح نافذة Meta الرسمية</a></div>}
+      {launchUrl && <p className="muted">سيُعيدك Meta إلى عنوان إعادة التوجيه أعلاه — يجب أن يكون مسجَّلاً في تطبيق Meta (Valid OAuth Redirect URIs)، وإلا رفض Meta الإطلاق. بعد العودة، انسخ قيمة <code>code</code> من عنوان الصفحة والصقها أدناه.</p>}
+      {canEdit ? <form className="grid2" onSubmit={async (e) => { e.preventDefault(); if (!code.trim()) { setResult('الصق رمز code الذي أعاده Meta أولاً.'); return; } setBusy(true); setResult(''); try {
+        const r = await api.embeddedSignupCallback(code.trim(), redirectUri.trim() || undefined);
+        setResult(r.ok ? `تم اختبار الاتصال بنجاح — لم يُحفظ أي رمز. الاسم المعروض: ${r.display_name || '—'}، معرّف WABA: ${r.waba_id || 'غير مضبوط بعد'}، معرّف الرقم: ${r.phone_number_id || 'غير مضبوط بعد'}. للإنتاج: انسخ هذه المعرفات (والرمز الدائم من System User) إلى Render Environment Variables ثم أعد النشر.` : `فشل الاختبار: ${r.error || 'خطأ غير معروف'}.`);
+      } catch (err) { setResult('خطأ في إكمال الربط: ' + (err as Error).message); } finally { setBusy(false); } }}>
+        <Field label="عنوان إعادة التوجيه (redirect_uri) المستخدم في الإطلاق"><input value={redirectUri} onChange={(e) => setRedirectUri(e.target.value)} /></Field>
+        <Field label="رمز code الذي أعاده Meta (قصير العمر — ليس رمز وصول)"><input value={code} onChange={(e) => setCode(e.target.value)} placeholder="الصق code هنا" /></Field>
+        <button className="btn" type="submit" disabled={busy || !cfg.embedded_configured}>{busy ? 'جارٍ الاختبار…' : 'إكمال الربط — اختبار فقط (لا حفظ)'}</button>
+      </form> : <p className="muted">إكمال الربط يتطلب صلاحية تعديل واتساب (whatsapp:edit).</p>}
+      {result && <p className="msg">{result}</p>}
+      <p className="muted">المسار اليدوي ما زال متاحاً كبديل: اضبط WHATSAPP_ACCESS_TOKEN وWHATSAPP_PHONE_NUMBER_ID وWHATSAPP_BUSINESS_ACCOUNT_ID في Render ثم أعد النشر، ثم اضغط «اختبار الرمز» في المعالج أدناه. هذا ليس ربطاً عبر QR أو تطبيق واتساب — كلا المسارين يستخدمان Cloud API الرسمي فقط.</p>
+    </>}
+  </Card>;
+}
+export function WhatsApp({ b, reload, me, sub }: { b: Bundle; reload: () => void; me: MeUser | null; sub?: 'connection' | 'settings' }) {
   const [status, setStatus] = useState<WhatsAppStatus | null>(null);
   const [err, setErr] = useState('');
   const [testMsg, setTestMsg] = useState('');
@@ -623,40 +976,34 @@ export function WhatsApp({ b, reload, me, sub }: { b: Bundle; reload: () => void
   const [testingToken, setTestingToken] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendForm, setSendForm] = useState({ to: '', mode: 'text' as 'text' | 'template', body: '', template_name: '' });
+  const [stepFilter, setStepFilter] = useState('all');
+  const [settingsQ, setSettingsQ] = useState('');
   const canEdit = hasAction(me, 'whatsapp', 'edit');
   useEffect(() => {
     api.whatsappStatus().then(setStatus).catch((e) => setErr((e as Error).message));
   }, []);
   const refresh = () => { api.whatsappStatus().then(setStatus).catch((e) => setErr((e as Error).message)); reload(); };
-  if (sub === 'templates') return <Templates b={b} reload={reload} canEdit={canEdit} />;
-  if (sub === 'settings') return <Card title="إعدادات واتساب" sub="أسماء متغيرات البيئة فقط — القيم تعيش في بيئة الخادم حصراً ولا تُكتب هنا ولا في أي ملف ولا في المحادثة.">
-    <ul>
-      <li><code>WHATSAPP_VERIFY_TOKEN</code> — رمز تحقق Webhook (يُطابق ما يُدخل في Meta).</li>
-      <li><code>WHATSAPP_APP_SECRET</code> — سر التطبيق للتحقق من توقيع HMAC-SHA256.</li>
-      <li><code>WHATSAPP_ACCESS_TOKEN</code> — رمز الوصول الدائم (System User Token) للرسائل الصادرة.</li>
-      <li><code>WHATSAPP_PHONE_NUMBER_ID</code> — معرّف الرقم المخصص للخدمة.</li>
-      <li><code>WHATSAPP_BUSINESS_ACCOUNT_ID</code> — معرّف حساب WhatsApp Business.</li>
-      <li><code>WHATSAPP_API_VERSION</code> — إصدار Graph API (الافتراضي عند التنفيذ: v26.0).</li>
-      <li><code>APP_BASE_URL</code> — عنوان الموقع الحي، يُستخدم لبناء عنوان Webhook.</li>
-      <li><code>JWT_SECRET</code> — سر توقيع رموز الدخول (8 ساعات).</li>
-    </ul>
-    <p className="muted">تُضبط هذه المتغيرات في لوحة Render (Environment) ثم يُعاد النشر — المتغيرات لا تسري قبل إعادة النشر. لا يوجد في هذه الواجهة أي حقل لإدخال رمز أو سر، عمداً.</p>
-  </Card>;
-  if (sub === 'webhook') return <Card title="حالة Webhook" sub="حالة فقط — لا تُعرض أي قيمة سرية هنا أبداً.">
-    <p>الخادم: {b.healthOk ? <Badge tone="ok">متصل</Badge> : <Badge tone="bad">غير متصل</Badge>}</p>
-    {status ? <ul>
-      <li>رمز التحقق مضبوط: {status.webhook_verify_configured ? 'نعم' : 'لا'}</li>
-      <li>التحقق بتوقيع HMAC مفعّل: {status.webhook_hmac_configured ? 'نعم' : 'لا'}</li>
-      <li>رمز الوصول مضبوط: {status.whatsapp_access_configured ? 'نعم' : 'لا'}</li>
-      <li>رقم الهاتف مضبوط: {status.phone_number_configured === undefined ? 'غير معروف (الخادم القديم لا يرسل هذا الحقل)' : status.phone_number_configured ? 'نعم' : 'لا'}</li>
-      <li>حساب WABA مضبوط: {status.waba_configured === undefined ? 'غير معروف (الخادم القديم لا يرسل هذا الحقل)' : status.waba_configured ? 'نعم' : 'لا'}</li>
-      <li>إصدار API: {status.api_version || 'غير معروف (الخادم القديم لا يرسل هذا الحقل)'}</li>
-      <li>قوالب معتمدة محلياً: {status.templates_approved} من {status.templates_total}</li>
-      <li>قوالب معتمدة لدى Meta: {status.templates_meta_approved === undefined ? 'غير معروف (الخادم القديم لا يرسل هذا الحقل)' : `${status.templates_meta_approved} من ${status.templates_total}`}</li>
-    </ul> : <p className="muted">{err ? 'تعذر جلب حالة Webhook: ' + err : 'جارٍ الجلب…'}</p>}
-    <p className="muted">نقطة Webhook: <code>GET/POST /api/whatsapp/webhook</code> — التحقق GET يقارن رمز Meta، والوارد POST يتحقق من توقيع <code>x-hub-signature-256</code> عند ضبط السر.</p>
-    <p className="muted">عنوان Webhook الكامل (استخدم نطاقك الحي إن تغيّر عن Render): <code>{status?.app_base_url ? status.app_base_url.replace(/\/$/, '') + '/api/whatsapp/webhook' : LIVE_WEBHOOK_EXAMPLE}</code>{!status?.app_base_url && ' — هذا مثال بالنطاق الحي الحالي؛ إن كان نطاقك مختلفاً، استبدل النطاق فقط واحتفظ بالمسار.'}</p>
-  </Card>;
+  if (sub === 'settings') {
+    const ENV_VARS: { name: string; desc: string }[] = [
+      { name: 'WHATSAPP_VERIFY_TOKEN', desc: 'رمز تحقق Webhook (يُطابق ما يُدخل في Meta).' },
+      { name: 'WHATSAPP_APP_SECRET', desc: 'سر التطبيق للتحقق من توقيع HMAC-SHA256.' },
+      { name: 'WHATSAPP_ACCESS_TOKEN', desc: 'رمز الوصول الدائم (System User Token) للرسائل الصادرة.' },
+      { name: 'WHATSAPP_PHONE_NUMBER_ID', desc: 'معرّف الرقم المخصص للخدمة.' },
+      { name: 'WHATSAPP_BUSINESS_ACCOUNT_ID', desc: 'معرّف حساب WhatsApp Business.' },
+      { name: 'WHATSAPP_API_VERSION', desc: 'إصدار Graph API (الافتراضي عند التنفيذ: v26.0).' },
+      { name: 'WHATSAPP_APP_ID', desc: 'معرّف تطبيق Meta (معامل إطلاق Embedded Signup، ليس سراً).' },
+      { name: 'WHATSAPP_CONFIG_ID', desc: 'معرّف تكوين Embedded Signup من لوحة تطبيق Meta (ليس سراً).' },
+      { name: 'APP_BASE_URL', desc: 'عنوان الموقع الحي، يُستخدم لبناء عنوان Webhook.' },
+      { name: 'JWT_SECRET', desc: 'سر توقيع رموز الدخول (8 ساعات).' },
+    ];
+    const shownEnv = ENV_VARS.filter((v) => settingsQ.trim() === '' || `${v.name} ${v.desc}`.toLowerCase().includes(settingsQ.trim().toLowerCase()));
+    return <Card title="إعدادات واتساب" sub="أسماء متغيرات البيئة فقط — القيم تعيش في بيئة الخادم حصراً ولا تُكتب هنا ولا في أي ملف ولا في المحادثة.">
+      <div className="btn-row"><input className="inline-input" placeholder="بحث باسم المتغير أو وصفه" value={settingsQ} onChange={(e) => setSettingsQ(e.target.value)} /></div>
+      {shownEnv.length === 0 ? <Empty text="لا متغيرات مطابقة للبحث الحالي." /> :
+        <ul>{shownEnv.map((v) => <li key={v.name}><code>{v.name}</code> — {v.desc}</li>)}</ul>}
+      <p className="muted">تُضبط هذه المتغيرات في لوحة Render (Environment) ثم يُعاد النشر — المتغيرات لا تسري قبل إعادة النشر. لا يوجد في هذه الواجهة أي حقل لإدخال رمز أو سر، عمداً.</p>
+    </Card>;
+  }
   // --- Connection wizard (default sub) ---
   // When the backend returns wizard_steps, those 7 steps (keys, titles,
   // statuses) are rendered verbatim, in the backend's order — the UI never
@@ -709,18 +1056,26 @@ export function WhatsApp({ b, reload, me, sub }: { b: Bundle; reload: () => void
       if (r.ok) setTestMsg(`نتيجة الإرسال: ${r.dry_run ? 'لم يُرسل إلى واتساب — وضع تجريبي لأن Meta غير موصول. (تمت المحاكاة محلياً فقط.)' : `أُرسل إلى واتساب — معرّف الرسالة: ${r.wamid || r.message_id || '—'}.`}`);
       else if (r.error === 'outside_24h_window_use_template') setTestMsg('لم يُرسل: خارج نافذة 24 ساعة — لا يمكن إرسال نص حر الآن. أرسل قالباً معتمداً لدى Meta بدل النص الحر (اختر «قالب» أعلاه)، أو انتظر رسالة جديدة من العميل تفتح نافذة جديدة.');
       else if (r.error === 'template_not_approved') setTestMsg('لم يُرسل: القالب غير معتمد محلياً لدى الخادم — الخادم يرفض إرسال قالب حالته المحلية ليست «معتمد». راجع حالتي القالب في تبويب «القوالب» (المحلية وMeta) قبل إعادة المحاولة.');
+      else if (r.error === 'template_not_meta_approved') setTestMsg('لم يُرسل: القالب معتمد محلياً لكن Meta لم تعتمده بعد — عند اتصال Meta لا يكفي الاعتماد المحلي. راجع حالة Meta في تبويب «القوالب»، وقدّم القالب وانتظر موافقة Meta.');
       else if (r.error === 'template_not_found') setTestMsg('لم يُرسل: القالب غير موجود في الخادم — اختر قالباً من القائمة.');
       else setTestMsg(`لم يُرسل: ${r.error || 'خطأ غير معروف'}.`);
     } catch (err) { setTestMsg('خطأ في الإرسال: ' + (err as Error).message + ' — إذا كان الخادم لا يوفّر هذا الـ endpoint بعد، فالواجهة جاهزة والخادم ما زال قيد التنفيذ.'); }
     finally { setSending(false); }
   }
   return <>
+    <EmbeddedSignupCard canEdit={canEdit} />
     <Card title={`معالج ربط واتساب — ${steps.length} خطوات`} sub={`مكتمل: ${doneCount} من ${steps.length}${blockedCount ? ` — متعذّر: ${blockedCount}` : ''} — الحالة من الخادم (GET /api/whatsapp/status)، وليست من المتصفح. لا يوجد هنا أي حقل لإدخال رمز أو سر.`}>
       {!status && <p className="muted">{err ? 'تعذر جلب حالة الربط: ' + err : 'جارٍ جلب حالة الربط من الخادم…'}</p>}
       {status && !status.wizard_steps && <p className="local-note">الخادم الحالي لا يرسل wizard_steps بعد — الخطوات أدناه مشتقة من الحقول القديمة فقط (بانتظار ما لم يثبته الخادم)، وستُعرض حالة الخادم الحقيقية فور توفر الـ endpoint الجديد.</p>}
+      <div className="btn-row">
+        <input className="inline-input" placeholder="بحث في خطوات الربط" value={stepFilter === 'all' || stepFilter === 'done' || stepFilter === 'pending' || stepFilter === 'blocked' ? '' : stepFilter} onChange={(e) => setStepFilter(e.target.value)} />
+        <select className="inline-select" value={['done', 'pending', 'blocked'].includes(stepFilter) ? stepFilter : 'all'} onChange={(e) => setStepFilter(e.target.value)}>
+          <option value="all">كل الخطوات</option><option value="done">المكتملة فقط</option><option value="pending">بانتظار فقط</option><option value="blocked">المتعذّرة فقط</option>
+        </select>
+      </div>
       <ol className="wizard">
-        {steps.map((s, i) => <li key={s.key} className="wizard-step">
-          <div className="wizard-head"><b>{i + 1}. {s.title}</b><Badge tone={stepTone(s.status)}>{stepAr(s.status)}</Badge></div>
+        {steps.map((s, i) => ({ ...s, num: i + 1 })).filter((s) => (['done', 'pending', 'blocked'].includes(stepFilter) ? s.status === stepFilter : true) && (['done', 'pending', 'blocked'].includes(stepFilter) || stepFilter === 'all' || `${s.title} ${s.detail}`.toLowerCase().includes(stepFilter.toLowerCase()))).map((s) => <li key={s.key} className="wizard-step">
+          <div className="wizard-head"><b>{s.num}. {s.title}</b><Badge tone={stepTone(s.status)}>{stepAr(s.status)}</Badge></div>
           <p className="muted">{s.detail}</p>
           {(s.key === 'app_token' || s.key === 'meta_connection') && <>
             <p className="local-note">⚠️ اضبط WHATSAPP_ACCESS_TOKEN (وأي متغير آخر) في Render فقط: Environment ← Add Environment Variable ثم Redeploy. لا تلصق أي رمز في هذا النموذج — لا يوجد حقل رمز هنا عمداً، ولا يُعرض الرمز أبداً.</p>
@@ -754,6 +1109,20 @@ export function WhatsApp({ b, reload, me, sub }: { b: Bundle; reload: () => void
       </ol>
       <div className="btn-row"><button className="btn ghost" onClick={refresh}>تحديث الحالة من الخادم</button></div>
       <p className="muted">قواعد ثابتة: لا محفظة داخلية، لا متجر، لا إجراء مالي آلي، واجهة العميل واتساب فقط، رقم مخصص للخدمة، بدون وسيط (BSP)، وكل الحسابات باسم العميل.</p>
+    </Card>
+    <Card title="حالة Webhook" sub="حالة فقط — لا تُعرض أي قيمة سرية هنا أبداً. (كانت واجهة مستقلة؛ الآن هي جزء من «الربط والحسابات».)">
+      <p>الخادم: {b.healthOk ? <Badge tone="ok">متصل</Badge> : <Badge tone="bad">غير متصل</Badge>}</p>
+      {status ? <ul>
+        <li>رمز التحقق مضبوط: {status.webhook_verify_configured ? 'نعم' : 'لا'}</li>
+        <li>التحقق بتوقيع HMAC مفعّل: {status.webhook_hmac_configured ? 'نعم' : 'لا'}</li>
+        <li>رمز الوصول مضبوط: {status.whatsapp_access_configured ? 'نعم' : 'لا'}</li>
+        <li>رقم الهاتف مضبوط: {status.phone_number_configured === undefined ? 'غير معروف' : status.phone_number_configured ? 'نعم' : 'لا'}</li>
+        <li>حساب WABA مضبوط: {status.waba_configured === undefined ? 'غير معروف' : status.waba_configured ? 'نعم' : 'لا'}</li>
+        <li>إصدار API: {status.api_version || 'غير معروف'}</li>
+        <li>قوالب معتمدة محلياً: {status.templates_approved} من {status.templates_total}</li>
+        <li>قوالب معتمدة لدى Meta: {status.templates_meta_approved === undefined ? 'غير معروف' : `${status.templates_meta_approved} من ${status.templates_total}`}</li>
+      </ul> : <p className="muted">{err ? 'تعذر جلب حالة Webhook: ' + err : 'جارٍ الجلب…'}</p>}
+      <p className="muted">نقطة Webhook: <code>GET/POST /api/whatsapp/webhook</code> — التحقق GET يقارن رمز Meta، والوارد POST يتحقق من توقيع <code>x-hub-signature-256</code> عند ضبط السر. العنوان الكامل: <code>{webhookUrl}</code></p>
     </Card>
   </>;
 }

@@ -4,7 +4,7 @@
 // `Authorization: Bearer <token>` on every request. On a 401 the token is
 // cleared and a `ps:unauthorized` event is fired so the app can show the
 // login screen again. No password or secret value is ever stored here.
-import type { AuditEntry, Contract, Conversation, Message, Task, Template, User, WhatsAppSendInput, WhatsAppSendResult, WhatsAppStatusFull, WhatsAppTemplateCreateInput, WhatsAppTemplateSubmitResult, WhatsAppTemplateSyncResult, WhatsAppTestTokenResult, Workflow, WorkflowStep } from './types';
+import type { AuditEntry, Contact, ContactImportReport, Contract, Conversation, Message, Task, Template, User, EmbeddedSignupCallbackResult, EmbeddedSignupConfig, WhatsAppSendInput, WhatsAppSendResult, WhatsAppStatusFull, WhatsAppTemplateCreateInput, WhatsAppTemplateSubmitResult, WhatsAppTemplateSyncResult, WhatsAppTemplateUpdateInput, WhatsAppTestTokenResult, Workflow, WorkflowStep } from './types';
 
 const TOKEN_KEY = 'ps_token';
 export function getToken(): string | null { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } }
@@ -37,8 +37,73 @@ export interface AutomationRule {
 }
 export interface ChecklistStep { step: number; key: string; title_ar: string; description_ar: string; status: string; }
 
+async function reqForm<T>(path: string, form: FormData): Promise<T> {
+  const headers: Record<string, string> = {};
+  const token = getToken();
+  if (token) headers.Authorization = 'Bearer ' + token;
+  const res = await fetch(path, { headers, method: 'POST', body: form });
+  const body = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    clearToken();
+    try { window.dispatchEvent(new CustomEvent('ps:unauthorized')); } catch { /* ignore */ }
+  }
+  if (!res.ok) {
+    const err = new Error((body as { error?: string }).error || `خطأ ${res.status} من ${path}`) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
+  }
+  return body as T;
+}
+export interface AutomationLog { id: number; conversation_id: number | null; workflow_id: number | null; workflow_kind: string | null; workflow_name: string | null; outcome: string; details: Record<string, unknown>; created_at: string; }
+export interface WhatsAppUpload { id: number; filename: string; stored_filename: string; mime_type: string; kind: string; size_bytes: number; media_id: string | null; conversation_id: number | null; uploaded_by: string; dry_run: boolean; created_at: string; }
+
+// Raw-text fetch (CSV export): same Bearer auth, but the body is text, not JSON.
+async function reqText(path: string): Promise<string> {
+  const headers: Record<string, string> = {};
+  const token = getToken();
+  if (token) headers.Authorization = 'Bearer ' + token;
+  const res = await fetch(path, { headers });
+  if (res.status === 401) {
+    clearToken();
+    try { window.dispatchEvent(new CustomEvent('ps:unauthorized')); } catch { /* ignore */ }
+  }
+  if (!res.ok) throw new Error(`خطأ ${res.status} من ${path}`);
+  return res.text();
+}
+// Blob fetch (stored-file download): the download endpoint needs the same
+// Bearer token, so a plain <a href> would return 401 — fetch it, then object-URL it.
+async function reqBlob(path: string): Promise<Blob> {
+  const headers: Record<string, string> = {};
+  const token = getToken();
+  if (token) headers.Authorization = 'Bearer ' + token;
+  const res = await fetch(path, { headers });
+  if (res.status === 401) {
+    clearToken();
+    try { window.dispatchEvent(new CustomEvent('ps:unauthorized')); } catch { /* ignore */ }
+  }
+  if (!res.ok) throw new Error(`خطأ ${res.status} من ${path}`);
+  return res.blob();
+}
+
 export const api = {
   health: () => req<{ ok: boolean; service: string; states: string[] }>('/health'),
+  // Stage C contacts (contract-scoped only, whatsapp:view / whatsapp:edit).
+  // No broadcast endpoint exists; these calls never create an audience.
+  contacts: (params?: Record<string, string>) => {
+    const qs = params ? '?' + new URLSearchParams(Object.entries(params).filter(([, v]) => v !== '')).toString() : '';
+    return req<Contact[]>(`/api/contacts${qs}`);
+  },
+  getContact: (id: number) => req<Contact>(`/api/contacts/${id}`),
+  createContact: (b: { name?: string; phone: string; labels?: string[]; notes?: string }) =>
+    req<Contact>('/api/contacts', { method: 'POST', body: JSON.stringify(b) }),
+  updateContact: (id: number, b: { name?: string; phone?: string; labels?: string[]; notes?: string }) =>
+    req<Contact>(`/api/contacts/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+  deleteContact: (id: number) =>
+    req<{ ok: boolean }>(`/api/contacts/${id}`, { method: 'DELETE' }),
+  importContacts: (csv: string) =>
+    req<ContactImportReport>('/api/contacts/import', { method: 'POST', body: JSON.stringify({ csv }) }),
+  exportContacts: () => reqText('/api/contacts/export'),
+  downloadUpload: (id: number) => reqBlob(`/api/whatsapp/uploads/${id}/download`),
   login: (email: string, password: string) =>
     req<{ token: string; user: MeUser }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
   me: () => req<MeUser>('/api/auth/me'),
@@ -52,12 +117,47 @@ export const api = {
   whatsappTestToken: () => req<WhatsAppTestTokenResult>('/api/whatsapp/test-token', { method: 'POST' }),
   whatsappSend: (b: WhatsAppSendInput) =>
     req<WhatsAppSendResult>('/api/whatsapp/send', { method: 'POST', body: JSON.stringify(b) }),
+  // Stage B: real file upload (multipart, Node built-ins server-side).
+  // 16 MB cap, image/video/document/audio only, filename sanitized
+  // server-side; when Meta is configured the file is uploaded to Meta
+  // and sent by media ID, otherwise it is a dry-run local record.
+  whatsappUpload: (file: File, opts: { conversation_id?: number; to?: string; caption?: string }) => {
+    const form = new FormData();
+    form.append('file', file);
+    if (opts.conversation_id) form.append('conversation_id', String(opts.conversation_id));
+    if (opts.to) form.append('to', opts.to);
+    if (opts.caption) form.append('caption', opts.caption);
+    return reqForm<{ ok: boolean; dry_run?: boolean; configured?: boolean; wamid?: string; upload: WhatsAppUpload; message?: unknown; error?: string }>('/api/whatsapp/upload', form);
+  },
+  whatsappUploads: () => req<WhatsAppUpload[]>('/api/whatsapp/uploads'),
+  whatsappMediaUrl: (mediaId: string) =>
+    req<{ ok: boolean; configured: boolean; download_url: string | null; mime_type?: string | null }>(`/api/whatsapp/media/${encodeURIComponent(mediaId)}`),
+  // Stage B: automation execution controls (automation:edit for run /
+  // handoff / resume, automation:view for logs and state).
+  runWorkflow: (id: number, conversation_id: number) =>
+    req<{ ok: boolean; outcome?: string; blocked_reason?: string }>(`/api/workflows/${id}/run`, { method: 'POST', body: JSON.stringify({ conversation_id }) }),
+  runRule: (id: number, conversation_id: number) =>
+    req<{ ok: boolean; outcome?: string; blocked_reason?: string }>(`/api/automation/rules/${id}/run`, { method: 'POST', body: JSON.stringify({ conversation_id }) }),
+  handoffConversation: (id: number) =>
+    req<{ ok: boolean; handed_off: boolean }>(`/api/conversations/${id}/automation/handoff`, { method: 'POST' }),
+  resumeAutomation: (id: number) =>
+    req<{ ok: boolean; handed_off: boolean }>(`/api/conversations/${id}/automation/resume`, { method: 'POST' }),
+  automationLogs: (conversation_id?: number) =>
+    req<AutomationLog[]>(`/api/automation/logs${conversation_id ? `?conversation_id=${conversation_id}` : ''}`),
   createWhatsAppTemplate: (b: WhatsAppTemplateCreateInput) =>
     req<Template>('/api/whatsapp/templates', { method: 'POST', body: JSON.stringify(b) }),
   submitWhatsAppTemplate: (id: number) =>
     req<WhatsAppTemplateSubmitResult>(`/api/whatsapp/templates/${id}/submit`, { method: 'POST' }),
   syncWhatsAppTemplates: () =>
     req<WhatsAppTemplateSyncResult>('/api/whatsapp/templates/sync', { method: 'POST' }),
+  embeddedSignupConfig: () =>
+    req<EmbeddedSignupConfig>('/api/whatsapp/embedded-signup/config'),
+  embeddedSignupCallback: (code: string, redirect_uri?: string) =>
+    req<EmbeddedSignupCallbackResult>('/api/whatsapp/embedded-signup/callback', { method: 'POST', body: JSON.stringify({ code, ...(redirect_uri ? { redirect_uri } : {}) }) }),
+  getWhatsAppTemplate: (id: number) =>
+    req<Template>(`/api/whatsapp/templates/${id}`),
+  updateWhatsAppTemplate: (id: number, b: WhatsAppTemplateUpdateInput) =>
+    req<Template>(`/api/whatsapp/templates/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
   connectionChecklist: () => req<ChecklistStep[]>('/api/connection-checklist'),
   contracts: () => req<Contract[]>('/api/contracts'),
   createContract: (b: { buyer_phone: string; seller_phone: string; product_description: string; amount: number; currency: string; delivery_point?: string }) =>

@@ -238,7 +238,11 @@ server.listen(PORT, async () => {
         let parsed = null; try { parsed = b ? JSON.parse(b) : null; } catch {}
         mockRequests.push({ method: mreq.method, path: mreq.url, body: parsed });
         mres.writeHead(200, { 'Content-Type': 'application/json' });
+        if (mreq.method === 'GET' && mreq.url.includes('/oauth/access_token')) return mres.end(JSON.stringify({ access_token: 'mock-exchanged-token-xyz', token_type: 'bearer', expires_in: 3600 }));
+        if (mreq.method === 'GET' && mreq.url.includes('/phone_numbers')) return mres.end(JSON.stringify({ data: [{ id: '111222333', display_name: 'Mock Business' }] }));
         if (mreq.method === 'GET' && mreq.url.endsWith('/me')) return mres.end(JSON.stringify({ id: 'mock-me', name: 'Mock' }));
+        if (mreq.method === 'POST' && mreq.url.includes('/media')) return mres.end(JSON.stringify({ id: 'mock-media-123' }));
+        if (mreq.method === 'GET' && /^\/v[^/]+\/[^/]+$/.test(mreq.url)) return mres.end(JSON.stringify({ url: 'https://mock.example/media/mock-media-123', mime_type: 'image/jpeg', file_size: 1234 }));
         if (mreq.method === 'POST' && mreq.url.endsWith('/messages')) return mres.end(JSON.stringify({ messages: [{ id: 'wamid.mock.' + (++mockSeq) }] }));
         if (mreq.method === 'GET' && mreq.url.includes('/message_templates')) return mres.end(JSON.stringify({ data: [{ name: 'contract_created', status: 'APPROVED', category: 'UTILITY', language: 'ar' }] }));
         if (mreq.method === 'POST' && mreq.url.endsWith('/message_templates')) return mres.end(JSON.stringify({ id: 'mock-template-1', status: 'PENDING' }));
@@ -347,6 +351,10 @@ server.listen(PORT, async () => {
     const sendText = await api('/api/whatsapp/send', { method: 'POST', body: JSON.stringify({ to: '+967700000001', body: 'رد داخل النافذة' }) });
     check('send text success via mock (in-window)', sendText.status === 200 && sendText.body.dry_run === false && typeof sendText.body.wamid === 'string' && sendText.body.wamid.startsWith('wamid.mock.'), JSON.stringify(sendText.body));
     const sentWamid = sendText.body.wamid;
+    // New send gate (Stage A): Meta-configured sends need Meta approval too,
+    // so approve contract_created via the Meta webhook before sending it.
+    const preApproveRaw = JSON.stringify(templateStatusPayload('contract_created', 'APPROVED'));
+    await webhookRaw(preApproveRaw, hmacFor(preApproveRaw));
     const sendTpl = await api('/api/whatsapp/send', { method: 'POST', body: JSON.stringify({ to: '+967700000001', template_name: 'contract_created', language: 'ar' }) });
     check('send template success via mock', sendTpl.status === 200 && sendTpl.body.dry_run === false && sendTpl.body.message.template_name === 'contract_created', JSON.stringify(sendTpl.body));
     check('mock received template send with template name', mockRequests.some((r) => r.body && r.body.type === 'template' && r.body.template && r.body.template.name === 'contract_created'), JSON.stringify(mockRequests.map((r) => r.body && r.body.type)));
@@ -372,11 +380,293 @@ server.listen(PORT, async () => {
     const ksSend = await api('/api/whatsapp/send', { method: 'POST', body: JSON.stringify({ to: '+967700000001', body: 'محظور' }) });
     check('send rejected while kill switch is on', ksSend.status === 400 && /kill_switch_on/.test(ksSend.body.error || ''), JSON.stringify(ksSend.body));
     await api('/api/automation/kill-switch', { method: 'POST', body: JSON.stringify({ off: false }) });
+
+    // ---- Stage A: Embedded Signup + full template management + new send gate ----
+    const embBefore = await api('/api/whatsapp/embedded-signup/config');
+    check('embedded config reports not configured without app/config ids', embBefore.status === 200 && embBefore.body.embedded_configured === false && embBefore.body.launch === null && !JSON.stringify(embBefore.body).includes(TEST_SECRET), JSON.stringify(embBefore.body));
+    const embNoCode = await api('/api/whatsapp/embedded-signup/callback', { method: 'POST', body: JSON.stringify({ code: 'x' }) });
+    check('embedded callback without app/config ids rejected', embNoCode.status === 400 && /embedded_not_configured/.test(embNoCode.body.error || ''), JSON.stringify(embNoCode.body));
+    process.env.WHATSAPP_APP_ID = 'mock-app-id-123';
+    process.env.WHATSAPP_CONFIG_ID = 'mock-config-id-456';
+    const embCfg = await api('/api/whatsapp/embedded-signup/config');
+    check('embedded config ready with app/config ids, launch params public only', embCfg.status === 200 && embCfg.body.embedded_configured === true && embCfg.body.launch && embCfg.body.launch.client_id === 'mock-app-id-123' && embCfg.body.launch.config_id === 'mock-config-id-456' && !JSON.stringify(embCfg.body).includes(TEST_SECRET), JSON.stringify(embCfg.body));
+    const embStatus = await api('/api/whatsapp/status');
+    check('status carries embedded_signup booleans (manual vs embedded)', embStatus.status === 200 && embStatus.body.embedded_signup && embStatus.body.embedded_signup.configured === true && embStatus.body.meta_configured === true, JSON.stringify(embStatus.body.embedded_signup));
+    const embNoCode2 = await api('/api/whatsapp/embedded-signup/callback', { method: 'POST', body: JSON.stringify({}) });
+    check('embedded callback without code rejected', embNoCode2.status === 400 && embNoCode2.body.error === 'code is required', JSON.stringify(embNoCode2.body));
+    const embOk = await api('/api/whatsapp/embedded-signup/callback', { method: 'POST', body: JSON.stringify({ code: 'mock-code-1', redirect_uri: 'http://127.0.0.1/' }) });
+    check('embedded callback exchanges code, validates via /me, returns ids only', embOk.status === 200 && embOk.body.ok === true && embOk.body.tested === true && embOk.body.persisted === false && embOk.body.waba_id === '444555666' && embOk.body.phone_number_id === '111222333' && embOk.body.display_name === 'Mock Business', JSON.stringify(embOk.body));
+    check('embedded callback never returns the exchanged token or app secret', !JSON.stringify(embOk.body).includes('mock-exchanged-token-xyz') && !JSON.stringify(embOk.body).includes(TEST_SECRET), JSON.stringify(embOk.body));
+    let dataAfterEmb = '';
+    try { dataAfterEmb = fs.readFileSync(path.join(__dirname, 'data.json'), 'utf8'); } catch {}
+    check('embedded token not persisted to data file', !dataAfterEmb.includes('mock-exchanged-token-xyz'), 'token found in data file');
+    const unauthEmb = await api('/api/whatsapp/embedded-signup/config', { noAuth: true });
+    check('unauthenticated embedded config rejected (401)', unauthEmb.status === 401);
+    const tplGap = await api('/api/whatsapp/templates', { method: 'POST', body: JSON.stringify({ name: 'gap_notice', category: 'UTILITY', language: 'ar', body: 'رقم {{1}} و {{3}} هنا' }) });
+    check('template create rejects placeholder gap', tplGap.status === 400, JSON.stringify(tplGap.body));
+    const tplBadName = await api('/api/whatsapp/templates', { method: 'POST', body: JSON.stringify({ name: 'Bad-Name', category: 'UTILITY', language: 'ar', body: 'نص سليم' }) });
+    check('template create rejects uppercase/dash name', tplBadName.status === 400, JSON.stringify(tplBadName.body));
+    const tplManyBtns = await api('/api/whatsapp/templates', { method: 'POST', body: JSON.stringify({ name: 'many_btns', category: 'UTILITY', language: 'ar', body: 'نص سليم', buttons: ['a', 'b', 'c', 'd'] }) });
+    check('template create rejects more than 3 buttons', tplManyBtns.status === 400, JSON.stringify(tplManyBtns.body));
+    const tplStage = await api('/api/whatsapp/templates', { method: 'POST', body: JSON.stringify({ name: 'stage_notice', category: 'UTILITY', language: 'ar', body: 'تم إنشاء عقدك رقم {{1}} بمبلغ {{2}} ريال', header_type: 'text', header_text: 'تنبيه عقد', footer: 'فريق Pilot', buttons: ['تأكيد', 'دعم'], sample_values: ['PS-1001', '250'] }) });
+    check('template create with header/footer/buttons/samples', tplStage.status === 201 && tplStage.body.header_type === 'text' && tplStage.body.footer === 'فريق Pilot' && tplStage.body.sample_values.length === 2 && tplStage.body.meta_status === 'not_submitted', JSON.stringify(tplStage.body));
+    const tplPrev = await api(`/api/whatsapp/templates/${tplStage.body.id}`);
+    check('template preview renders sample values + sendable false while pending', tplPrev.status === 200 && tplPrev.body.preview && tplPrev.body.preview.includes('PS-1001') && tplPrev.body.preview.includes('250') && tplPrev.body.sendable === false && tplPrev.body.placeholders.length === 2, JSON.stringify(tplPrev.body));
+    const tplEdit = await api(`/api/whatsapp/templates/${tplStage.body.id}`, { method: 'PUT', body: JSON.stringify({ footer: 'فريق Pilot المحدّث', sample_values: ['PS-2002', '300'] }) });
+    check('template draft edit updates footer/samples', tplEdit.status === 200 && tplEdit.body.footer === 'فريق Pilot المحدّث' && tplEdit.body.sample_values[0] === 'PS-2002', JSON.stringify(tplEdit.body));
+    const tplEditName = await api(`/api/whatsapp/templates/${tplStage.body.id}`, { method: 'PUT', body: JSON.stringify({ name: 'renamed' }) });
+    check('template draft edit rejects name change', tplEditName.status === 400, JSON.stringify(tplEditName.body));
+    const tplSubmit = await api(`/api/whatsapp/templates/${tplStage.body.id}/submit`, { method: 'POST', body: JSON.stringify({}) });
+    check('template submit via mock sets pending + meta id', tplSubmit.status === 200 && tplSubmit.body.template.meta_status === 'pending' && tplSubmit.body.template.meta_template_id === 'mock-template-1', JSON.stringify(tplSubmit.body));
+    const tplEditLocked = await api(`/api/whatsapp/templates/${tplStage.body.id}`, { method: 'PUT', body: JSON.stringify({ footer: 'محاولة بعد التقديم' }) });
+    check('template pending at Meta is not draft-editable', tplEditLocked.status === 400 && /not_editable/.test(tplEditLocked.body.error || ''), JSON.stringify(tplEditLocked.body));
+    const tplSync = await api('/api/whatsapp/templates/sync', { method: 'POST', body: JSON.stringify({}) });
+    check('template sync via mock keeps pending template pending', tplSync.status === 200 && tplSync.body.configured === true, JSON.stringify(tplSync.body));
+    await api(`/api/templates/${tplStage.body.id}`, { method: 'PUT', body: JSON.stringify({ approval_status: 'approved' }) });
+    const gateSend = await api('/api/whatsapp/send', { method: 'POST', body: JSON.stringify({ to: '+967700000001', template_name: 'stage_notice', language: 'ar', parameters: ['PS-2002', '300'] }) });
+    check('send gate: local-only approved rejected when Meta configured', gateSend.status === 400 && gateSend.body.error === 'template_not_meta_approved', JSON.stringify(gateSend.body));
+    await webhookRaw(JSON.stringify(templateStatusPayload('stage_notice', 'APPROVED')), hmacFor(JSON.stringify(templateStatusPayload('stage_notice', 'APPROVED'))));
+    const gateSendOk = await api('/api/whatsapp/send', { method: 'POST', body: JSON.stringify({ to: '+967700000001', template_name: 'stage_notice', language: 'ar', parameters: ['PS-2002', '300'] }) });
+    check('send gate: Meta-approved allowed when Meta configured', gateSendOk.status === 200 && gateSendOk.body.dry_run === false && gateSendOk.body.message.template_name === 'stage_notice', JSON.stringify(gateSendOk.body));
+    // ---- Stage B: automation execution + file upload ----
+    // Deactivate the old storage-only workflow so its empty text step
+    // cannot win a keyword race in the tests below.
+    await api(`/api/workflows/${goodFlow.body.id}`, { method: 'PUT', body: JSON.stringify({ is_active: false }) });
+    const moneyNested = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'banned-nested', trigger_type: 'keyword', trigger_value: 'x', steps: [{ step_type: 'condition', if_contains: 'نعم', then: [{ step_type: 'release_money' }], else: [] }] }) });
+    check('Stage B save: nested money step in condition branch rejected', moneyNested.status === 400, JSON.stringify(moneyNested.body));
+    const moneyRule = await api('/api/automation/rules', { method: 'POST', body: JSON.stringify({ name: 'banned-rule', trigger_type: 'keyword', trigger_value: 'x', steps: [{ step_type: 'refund_money' }] }) });
+    check('Stage B save: money step in rule rejected', moneyRule.status === 400, JSON.stringify(moneyRule.body));
+    const kwShort = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'kw-short', trigger_type: 'keyword', trigger_value: 'عقد', steps: [{ step_type: 'text', content: 'رد قصير' }] }) });
+    const kwLong = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'kw-long', trigger_type: 'keyword', trigger_value: 'عقد جديد', steps: [{ step_type: 'text', content: 'رد طويل' }] }) });
+    const kwContain = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'kw-contain', trigger_type: 'keyword', trigger_value: 'استفسار', steps: [{ step_type: 'text', content: 'رد استفسار' }] }) });
+    check('Stage B keyword workflows created', kwShort.status === 201 && kwLong.status === 201 && kwContain.status === 201, JSON.stringify([kwShort.body, kwLong.body]));
+    const genConvFor = async (phone) => { const all = await api('/api/conversations?party=general'); return all.body.find((c) => c.phone === phone || String(c.phone || '').replace(/^\+/, '') === phone.replace(/^\+/, '')); };
+    const outBodiesFor = async (convId) => { const ms = await api(`/api/messages?conversation_id=${convId}&direction=out`); return ms.body.map((m) => m.body); };
+    // Keyword: exact before contains, longest wins.
+    await webhookRaw(JSON.stringify(inboundPayload('967711111111', 'wamid.b.kw1', 'عقد جديد')), hmacFor(JSON.stringify(inboundPayload('967711111111', 'wamid.b.kw1', 'عقد جديد'))));
+    const kwConv = await genConvFor('967711111111');
+    check('Stage B keyword longest/exact wins over short', kwConv && (await outBodiesFor(kwConv.id)).includes('رد طويل') && !(await outBodiesFor(kwConv.id)).includes('رد قصير'), JSON.stringify(kwConv));
+    await webhookRaw(JSON.stringify(inboundPayload('967711111112', 'wamid.b.kw2', 'عندي استفسار عن السعر')), hmacFor(JSON.stringify(inboundPayload('967711111112', 'wamid.b.kw2', 'عندي استفسار عن السعر'))));
+    const kwConv2 = await genConvFor('967711111112');
+    check('Stage B keyword contains matches', kwConv2 && (await outBodiesFor(kwConv2.id)).includes('رد استفسار'), JSON.stringify(kwConv2));
+    // Button/list reply trigger.
+    const btnWf = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'btn-wf', trigger_type: 'button_reply', trigger_value: 'تأكيد الطلب', steps: [{ step_type: 'text', content: 'شكرا على التأكيد' }] }) });
+    const btnPayload = { object: 'whatsapp_business_account', entry: [{ id: 'waba-test', changes: [{ field: 'messages', value: { messaging_product: 'whatsapp', messages: [{ from: '967711111113', id: 'wamid.b.btn1', timestamp: String(Math.floor(Date.now() / 1000)), type: 'interactive', interactive: { type: 'button_reply', button_reply: { id: 'confirm_order', title: 'تأكيد الطلب' } } }] } }] }] };
+    await webhookRaw(JSON.stringify(btnPayload), hmacFor(JSON.stringify(btnPayload)));
+    const btnConv = await genConvFor('967711111113');
+    check('Stage B button reply trigger', btnConv && (await outBodiesFor(btnConv.id)).includes('شكرا على التأكيد'), JSON.stringify(btnConv));
+    // Contract-event trigger (template step, Stage A gate respected).
+    const ceWf = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'ce-wf', trigger_type: 'contract-event', trigger_value: 'preparing', steps: [{ step_type: 'template', template_name: 'stage_notice', parameters: ['PS-2002', '300'] }] }) });
+    check('Stage B contract-event workflow created', ceWf.status === 201, JSON.stringify(ceWf.body));
+    const toPrep = await api(`/api/contracts/${id}/transition`, { method: 'POST', body: JSON.stringify({ to: 'preparing' }) });
+    check('Stage B contract transition to preparing accepted', toPrep.status === 200 && toPrep.body.state === 'preparing', JSON.stringify(toPrep.body));
+    const buyerOut = await api(`/api/messages?conversation_id=${buyerConvId}&direction=out`);
+    check('Stage B contract-event sends template to buyer conversation', buyerOut.body.some((m) => m.template_name === 'stage_notice' && m.automation === true), JSON.stringify(buyerOut.body.map((m) => m.template_name)));
+    // Fallback after 2 unknowns (no first-message/business workflows active yet).
+    const fbWf = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'fb-wf', trigger_type: 'fallback', steps: [{ step_type: 'text', content: 'لم أفهم، سيتواصل معك موظف' }] }) });
+    await webhookRaw(JSON.stringify(inboundPayload('967711111114', 'wamid.b.fb1', 'xyz123unknown')), hmacFor(JSON.stringify(inboundPayload('967711111114', 'wamid.b.fb1', 'xyz123unknown'))));
+    const fbConv = await genConvFor('967711111114');
+    const fbOut1 = fbConv ? await outBodiesFor(fbConv.id) : [];
+    await webhookRaw(JSON.stringify(inboundPayload('967711111114', 'wamid.b.fb2', 'abc987unknown')), hmacFor(JSON.stringify(inboundPayload('967711111114', 'wamid.b.fb2', 'abc987unknown'))));
+    const fbOut2 = fbConv ? await outBodiesFor(fbConv.id) : [];
+    check('Stage B fallback only after 2nd unknown message', fbConv && fbOut1.length === 0 && fbOut2.includes('لم أفهم، سيتواصل معك موظف'), JSON.stringify([fbOut1, fbOut2]));
+    // Business-hours / away triggers.
+    const bhWf = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'bh-wf', trigger_type: 'business_hours', trigger_value: '00:00-23:59', steps: [{ step_type: 'text', content: 'نحن متاحون الآن' }] }) });
+    const awWf = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'aw-wf', trigger_type: 'away', trigger_value: '00:00-00:01', steps: [{ step_type: 'text', content: 'نحن خارج الدوام الآن' }] }) });
+    await webhookRaw(JSON.stringify(inboundPayload('967711111115', 'wamid.b.bh1', 'مرحبا بالنهار')), hmacFor(JSON.stringify(inboundPayload('967711111115', 'wamid.b.bh1', 'مرحبا بالنهار'))));
+    const bhConv = await genConvFor('967711111115');
+    check('Stage B business-hours trigger', bhConv && (await outBodiesFor(bhConv.id)).includes('نحن متاحون الآن'), JSON.stringify(bhConv));
+    await api(`/api/workflows/${bhWf.body.id}`, { method: 'PUT', body: JSON.stringify({ is_active: false }) });
+    await webhookRaw(JSON.stringify(inboundPayload('967711111116', 'wamid.b.aw1', 'مرحبا بالليل')), hmacFor(JSON.stringify(inboundPayload('967711111116', 'wamid.b.aw1', 'مرحبا بالليل'))));
+    const awConv = await genConvFor('967711111116');
+    check('Stage B away trigger', awConv && (await outBodiesFor(awConv.id)).includes('نحن خارج الدوام الآن'), JSON.stringify(awConv));
+    await api(`/api/workflows/${awWf.body.id}`, { method: 'PUT', body: JSON.stringify({ is_active: false }) });
+    // First message trigger (and only the first).
+    const fmWf = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'fm-wf', trigger_type: 'first_message', steps: [{ step_type: 'text', content: 'أهلا بك لأول مرة' }] }) });
+    await webhookRaw(JSON.stringify(inboundPayload('967711111117', 'wamid.b.fm1', 'سلام')), hmacFor(JSON.stringify(inboundPayload('967711111117', 'wamid.b.fm1', 'سلام'))));
+    const fmConv = await genConvFor('967711111117');
+    const fmOut1 = fmConv ? await outBodiesFor(fmConv.id) : [];
+    await webhookRaw(JSON.stringify(inboundPayload('967711111117', 'wamid.b.fm2', 'سلام مرة أخرى')), hmacFor(JSON.stringify(inboundPayload('967711111117', 'wamid.b.fm2', 'سلام مرة أخرى'))));
+    const fmOut2 = fmConv ? await outBodiesFor(fmConv.id) : [];
+    check('Stage B first message triggers once only', fmConv && fmOut1.includes('أهلا بك لأول مرة') && fmOut2.length === fmOut1.length, JSON.stringify([fmOut1, fmOut2]));
+    await api(`/api/workflows/${fmWf.body.id}`, { method: 'PUT', body: JSON.stringify({ is_active: false }) });
+    // Ask question and wait for reply, then continue.
+    const askWf = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'ask-wf', trigger_type: 'keyword', trigger_value: 'سؤال', steps: [{ step_type: 'question_text', question: 'ما هو رقم طلبك؟' }, { step_type: 'text', content: 'شكرا، تم استلام رقم طلبك' }] }) });
+    await webhookRaw(JSON.stringify(inboundPayload('967711111118', 'wamid.b.ask1', 'سؤال')), hmacFor(JSON.stringify(inboundPayload('967711111118', 'wamid.b.ask1', 'سؤال'))));
+    const askConv = await genConvFor('967711111118');
+    const askOut1 = askConv ? await outBodiesFor(askConv.id) : [];
+    const askState1 = askConv ? await api(`/api/conversations/${askConv.id}/automation`) : null;
+    await webhookRaw(JSON.stringify(inboundPayload('967711111118', 'wamid.b.ask2', '12345')), hmacFor(JSON.stringify(inboundPayload('967711111118', 'wamid.b.ask2', '12345'))));
+    const askOut2 = askConv ? await outBodiesFor(askConv.id) : [];
+    const askState2 = askConv ? await api(`/api/conversations/${askConv.id}/automation`) : null;
+    check('Stage B ask question waits, then continues on reply', askConv && askOut1.length === 1 && askOut1[0] === 'ما هو رقم طلبك؟' && askState1 && askState1.body.waiting && askOut2.includes('شكرا، تم استلام رقم طلبك') && askState2 && !askState2.body.waiting, JSON.stringify([askOut1, askOut2, askState1 && askState1.body, askState2 && askState2.body]));
+    // Condition / branch.
+    const condWf = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'cond-wf', trigger_type: 'keyword', trigger_value: 'فرع', steps: [{ step_type: 'condition', if_contains: 'نعم', then: [{ step_type: 'text', content: 'اخترت نعم' }], else: [{ step_type: 'text', content: 'اخترت لا' }] }] }) });
+    await webhookRaw(JSON.stringify(inboundPayload('967711111119', 'wamid.b.cd1', 'فرع نعم')), hmacFor(JSON.stringify(inboundPayload('967711111119', 'wamid.b.cd1', 'فرع نعم'))));
+    const cdConv = await genConvFor('967711111119');
+    await webhookRaw(JSON.stringify(inboundPayload('967711111120', 'wamid.b.cd2', 'فرع لا')), hmacFor(JSON.stringify(inboundPayload('967711111120', 'wamid.b.cd2', 'فرع لا'))));
+    const cdConv2 = await genConvFor('967711111120');
+    check('Stage B condition branches on reply text', cdConv && (await outBodiesFor(cdConv.id)).includes('اخترت نعم') && cdConv2 && (await outBodiesFor(cdConv2.id)).includes('اخترت لا'), JSON.stringify(cdConv));
+    // Assign + label + note + task in one flow.
+    const opsWf = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'ops-wf', trigger_type: 'keyword', trigger_value: 'تشغيل', steps: [{ step_type: 'assign', assigned_to: 'ops-stageb' }, { step_type: 'add_label', label: 'stageb-label' }, { step_type: 'add_note', content: 'ملاحظة أتمتة' }, { step_type: 'create_task', title: 'مهمة أتمتة مرحلة B' }] }) });
+    await webhookRaw(JSON.stringify(inboundPayload('967711111121', 'wamid.b.ops1', 'تشغيل')), hmacFor(JSON.stringify(inboundPayload('967711111121', 'wamid.b.ops1', 'تشغيل'))));
+    const opsConv = await genConvFor('967711111121');
+    const opsConvAfter = opsConv ? await api(`/api/conversations/${opsConv.id}`) : null;
+    const opsState = opsConv ? await api(`/api/conversations/${opsConv.id}/automation`) : null;
+    const opsTasks = await api('/api/tasks?type=automation');
+    const opsNotes = opsConv ? await api(`/api/messages?conversation_id=${opsConv.id}&internal=true`) : null;
+    check('Stage B assign/label/note/task actions', opsConv && opsConvAfter && opsConvAfter.body.assigned_to === 'ops-stageb' && opsState && opsState.body.labels.includes('stageb-label') && opsTasks.body.some((t) => t.title === 'مهمة أتمتة مرحلة B') && opsNotes && opsNotes.body.some((m) => m.body === 'ملاحظة أتمتة'), JSON.stringify([opsConvAfter && opsConvAfter.body, opsState && opsState.body]));
+    // Human handoff stops automation until a human resumes.
+    const hoWf = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'ho-wf', trigger_type: 'keyword', trigger_value: 'تحويل', steps: [{ step_type: 'text', content: 'قبل التحويل' }, { step_type: 'handover', handover_note: 'إلى موظف' }, { step_type: 'text', content: 'بعد التحويل يجب ألا يرسل' }] }) });
+    await webhookRaw(JSON.stringify(inboundPayload('967711111122', 'wamid.b.ho1', 'تحويل')), hmacFor(JSON.stringify(inboundPayload('967711111122', 'wamid.b.ho1', 'تحويل'))));
+    const hoConv = await genConvFor('967711111122');
+    const hoOut1 = hoConv ? await outBodiesFor(hoConv.id) : [];
+    await webhookRaw(JSON.stringify(inboundPayload('967711111122', 'wamid.b.ho2', 'تحويل مرة أخرى')), hmacFor(JSON.stringify(inboundPayload('967711111122', 'wamid.b.ho2', 'تحويل مرة أخرى'))));
+    const hoOut2 = hoConv ? await outBodiesFor(hoConv.id) : [];
+    const resume = hoConv ? await api(`/api/conversations/${hoConv.id}/automation/resume`, { method: 'POST', body: JSON.stringify({}) }) : null;
+    await webhookRaw(JSON.stringify(inboundPayload('967711111122', 'wamid.b.ho3', 'تحويل')), hmacFor(JSON.stringify(inboundPayload('967711111122', 'wamid.b.ho3', 'تحويل'))));
+    const hoOut3 = hoConv ? await outBodiesFor(hoConv.id) : [];
+    check('Stage B handoff stops automation until human resumes', hoConv && hoOut1.length === 1 && hoOut1[0] === 'قبل التحويل' && hoOut2.length === 1 && resume && resume.body.handed_off === false && hoOut3.length === 2, JSON.stringify([hoOut1, hoOut2, hoOut3]));
+    // Kill Switch blocks all automation sends (and logs the block).
+    await api('/api/automation/kill-switch', { method: 'POST', body: JSON.stringify({ off: true }) });
+    const ksWf = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'ks-wf', trigger_type: 'keyword', trigger_value: 'اختبار إيقاف', steps: [{ step_type: 'text', content: 'يجب ألا يرسل' }] }) });
+    await webhookRaw(JSON.stringify(inboundPayload('967711111123', 'wamid.b.ks1', 'اختبار إيقاف')), hmacFor(JSON.stringify(inboundPayload('967711111123', 'wamid.b.ks1', 'اختبار إيقاف'))));
+    const ksConv = await genConvFor('967711111123');
+    const ksOut = ksConv ? await outBodiesFor(ksConv.id) : [];
+    const ksLogs = ksConv ? await api(`/api/automation/logs?conversation_id=${ksConv.id}&outcome=blocked_kill_switch`) : null;
+    await api('/api/automation/kill-switch', { method: 'POST', body: JSON.stringify({ off: false }) });
+    check('Stage B kill switch blocks automation sends and logs it', ksConv && ksOut.length === 0 && ksLogs && ksLogs.body.length >= 1, JSON.stringify([ksOut, ksLogs && ksLogs.body]));
+    // Automation permission gating (viewer cannot manually run).
+    const viewerRun = await apiAs(viewerToken, `/api/workflows/${kwLong.body.id}/run`, { method: 'POST', body: JSON.stringify({ conversation_id: kwConv.id }) });
+    check('Stage B viewer cannot manually run automation (403)', viewerRun.status === 403, JSON.stringify(viewerRun.body));
+    // Automation execution log is readable.
+    const logs = await api(`/api/automation/logs?conversation_id=${kwConv.id}`);
+    check('Stage B automation execution log recorded', logs.status === 200 && logs.body.some((x) => x.outcome === 'completed' || x.outcome === 'sent'), JSON.stringify(logs.body.map((x) => x.outcome)));
+    // ---- Stage B file upload ----
+    async function uploadMultipart({ filename, mime, data, to, conversation_id, caption, tok }) {
+      const boundary = '----StageBTest' + crypto.randomBytes(6).toString('hex');
+      const parts = [];
+      const pushField = (name, value) => parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
+      if (to) pushField('to', to);
+      if (conversation_id) pushField('conversation_id', String(conversation_id));
+      if (caption) pushField('caption', caption);
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${mime}\r\n\r\n`));
+      parts.push(Buffer.isBuffer(data) ? data : Buffer.from(data));
+      parts.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+      const headers = { 'Content-Type': `multipart/form-data; boundary=${boundary}` };
+      if (tok) headers.Authorization = 'Bearer ' + tok;
+      else if (token) headers.Authorization = 'Bearer ' + token;
+      const r = await fetch(base + '/api/whatsapp/upload', { method: 'POST', headers, body: Buffer.concat(parts) });
+      let body = {}; try { body = await r.json(); } catch {} return { status: r.status, body };
+    }
+    const upBad = await uploadMultipart({ filename: 'evil.exe', mime: 'application/octet-stream', data: 'MZfake', to: '+967700000001' });
+    check('Stage B upload rejects bad file type', upBad.status === 400 && /unsupported/.test(upBad.body.error || ''), JSON.stringify(upBad.body));
+    const upBig = await uploadMultipart({ filename: 'big.png', mime: 'image/png', data: Buffer.alloc(16 * 1024 * 1024 + 1, 97) });
+    check('Stage B upload rejects oversize file (16 MB cap)', upBig.status === 413, JSON.stringify(upBig.body).slice(0, 200));
+    const upViewer = await uploadMultipart({ filename: 'ok.png', mime: 'image/png', data: Buffer.from('fakepng'), to: '+967700000001', tok: viewerToken });
+    check('Stage B upload requires whatsapp:edit (viewer 403)', upViewer.status === 403, JSON.stringify(upViewer.body));
+    const upSan = await uploadMultipart({ filename: '../../evil.png', mime: 'image/png', data: Buffer.from('fakepngdata'), to: '+967700000001', caption: 'صورة تجريبية' });
+    check('Stage B upload sanitizes filename, gets media ID, sends by media ID', upSan.status === 200 && upSan.body.upload && upSan.body.upload.filename === 'evil.png' && !upSan.body.upload.stored_filename.includes('..') && upSan.body.upload.media_id === 'mock-media-123' && upSan.body.dry_run === false && typeof upSan.body.wamid === 'string', JSON.stringify(upSan.body));
+    check('Stage B mock received media send by ID', mockRequests.some((r) => r.body && r.body.type === 'image' && r.body.image && r.body.image.id === 'mock-media-123'), JSON.stringify(mockRequests.slice(-3).map((r) => r.body)));
+    const upOnly = await uploadMultipart({ filename: 'doc.pdf', mime: 'application/pdf', data: Buffer.from('%PDF-fake') });
+    check('Stage B upload without recipient stores media ID only', upOnly.status === 201 && upOnly.body.upload && upOnly.body.upload.media_id === 'mock-media-123' && upOnly.body.upload.kind === 'document', JSON.stringify(upOnly.body));
+    const upList = await api('/api/whatsapp/uploads');
+    check('Stage B uploads list contains sanitized upload', upList.status === 200 && upList.body.some((u) => u.filename === 'evil.png'), JSON.stringify(upList.body.map((u) => u.filename)));
+    // Inbound media stores metadata (media ID, mime family via type, caption).
+    const mediaPayload = { object: 'whatsapp_business_account', entry: [{ id: 'waba-test', changes: [{ field: 'messages', value: { messaging_product: 'whatsapp', messages: [{ from: '967700000001', id: 'wamid.b.media1', timestamp: String(Math.floor(Date.now() / 1000)), type: 'image', image: { id: 'mock-in-media-1', caption: 'صورة المنتج' } }] } }] }] };
+    await webhookRaw(JSON.stringify(mediaPayload), hmacFor(JSON.stringify(mediaPayload)));
+    const mediaMsgs = await api(`/api/messages?conversation_id=${buyerConvId}`);
+    check('Stage B inbound media metadata stored', mediaMsgs.body.some((m) => m.wamid === 'wamid.b.media1' && m.media_type === 'image' && m.media_id === 'mock-in-media-1' && m.media_caption === 'صورة المنتج'), JSON.stringify(mediaMsgs.body.filter((m) => m.wamid === 'wamid.b.media1')));
+    const mediaUrl = await api('/api/whatsapp/media/mock-media-123');
+    check('Stage B media download link via Meta when configured', mediaUrl.status === 200 && mediaUrl.body.configured === true && mediaUrl.body.download_url === 'https://mock.example/media/mock-media-123', JSON.stringify(mediaUrl.body));
+    // ---- Stage B execution-time money rejection (banned workflow injected
+    // into a fresh child server process, because the save-time gate
+    // correctly refuses to create such a workflow through the API) ----
+    let execMoneyOk = false;
+    try {
+      const dataPath = path.join(__dirname, 'data.json');
+      const rawData = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
+      rawData.workflows.push({ id: 999001, name: 'banned-exec', trigger_type: 'manual', trigger_value: null, steps: [{ step_type: 'release_money' }], is_active: true });
+      fs.writeFileSync(dataPath, JSON.stringify(rawData, null, 2));
+      const { spawn: spawnChild } = require('child_process');
+      const child = spawnChild(process.execPath, [path.join(__dirname, 'server.js')], { cwd: path.join(__dirname, '..'), env: { ...process.env, PORT: '3457' }, stdio: 'ignore' });
+      const childBase = 'http://127.0.0.1:3457';
+      let childUp = false;
+      for (let i = 0; i < 50 && !childUp; i++) { try { const hr = await fetch(childBase + '/health'); if (hr.ok) childUp = true; } catch {} if (!childUp) await new Promise((r) => setTimeout(r, 100)); }
+      if (childUp) {
+        const cl = await fetch(childBase + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: ADMIN_EMAIL, password: ADMIN_PASSWORD }) });
+        const clBody = await cl.json().catch(() => ({}));
+        if (clBody.token) {
+          const runRes = await fetch(childBase + '/api/workflows/999001/run', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + clBody.token }, body: JSON.stringify({ conversation_id: buyerConvId }) });
+          const runBody = await runRes.json().catch(() => ({}));
+          execMoneyOk = (runRes.status === 400 && /money/.test(runBody.error || ''));
+        }
+      }
+      child.kill();
+      await new Promise((r) => setTimeout(r, 300));
+    } catch (e) { execMoneyOk = false; }
+    check('Stage B execution-time money step rejected at run', execMoneyOk, 'child run did not return money rejection');
+
+    // ---- Stage C: contacts (contract-scoped only, whatsapp permission family) ----
+    const cBuyer = await api('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'مشتري اختبار', phone: '+967700000001', labels: ['عميل متكرر', 'أولوية'], notes: 'ملاحظة اختبار' }) });
+    check('Stage C contact created for contract buyer phone', cBuyer.status === 201 && cBuyer.body.phone === '+967700000001' && Array.isArray(cBuyer.body.roles) && cBuyer.body.roles.includes('buyer'), JSON.stringify(cBuyer.body));
+    const cBad = await api('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'x', phone: 'abc' }) });
+    check('Stage C contact invalid phone rejected (400)', cBad.status === 400, JSON.stringify(cBad.body));
+    const cDup = await api('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'dup', phone: '967 700 000 001' }) });
+    check('Stage C contact duplicate phone rejected (409, format-insensitive)', cDup.status === 409, JSON.stringify(cDup.body));
+    const cSeller = await api('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'بائع اختبار', phone: '+967700000002', labels: ['عميل متكرر'] }) });
+    check('Stage C contact created for contract seller phone', cSeller.status === 201 && cSeller.body.roles.includes('seller'), JSON.stringify(cSeller.body));
+    const cStranger = await api('/api/contacts', { method: 'POST', body: JSON.stringify({ name: 'غريب', phone: '+967700000099' }) });
+    check('Stage C contact without contract has no roles and is not eligible', cStranger.status === 201 && cStranger.body.roles.length === 0 && cStranger.body.utility_eligible === false && cStranger.body.contracts.length === 0, JSON.stringify(cStranger.body));
+    const cSearch = await api('/api/contacts?q=' + encodeURIComponent('مشتري'));
+    check('Stage C contacts search by name', cSearch.status === 200 && cSearch.body.some((x) => x.id === cBuyer.body.id) && !cSearch.body.some((x) => x.id === cSeller.body.id), JSON.stringify(cSearch.body.map((x) => x.name)));
+    const cSeg = await api('/api/contacts?segment=' + encodeURIComponent('عميل متكرر'));
+    check('Stage C contacts segment filter', cSeg.status === 200 && cSeg.body.some((x) => x.id === cBuyer.body.id) && cSeg.body.some((x) => x.id === cSeller.body.id) && !cSeg.body.some((x) => x.id === cStranger.body.id), JSON.stringify(cSeg.body.map((x) => x.name)));
+    const cRoleB = await api('/api/contacts?role=buyer');
+    check('Stage C contacts role=buyer filter', cRoleB.status === 200 && cRoleB.body.some((x) => x.id === cBuyer.body.id) && !cRoleB.body.some((x) => x.id === cSeller.body.id), JSON.stringify(cRoleB.body.map((x) => x.name)));
+    const cRoleS = await api('/api/contacts?role=seller');
+    check('Stage C contacts role=seller filter', cRoleS.status === 200 && cRoleS.body.some((x) => x.id === cSeller.body.id) && !cRoleS.body.some((x) => x.id === cBuyer.body.id), JSON.stringify(cRoleS.body.map((x) => x.name)));
+    const cDetail = await api(`/api/contacts/${cBuyer.body.id}`);
+    check('Stage C contact detail links conversations+contracts, eligible via prior inbound', cDetail.status === 200 && cDetail.body.contracts.some((x) => x.id === id && x.role === 'buyer') && cDetail.body.conversations.some((x) => x.id === buyerConvId) && cDetail.body.utility_eligible === true && cDetail.body.eligibility_basis === 'prior_inbound' && !!cDetail.body.last_contact_at, JSON.stringify(cDetail.body));
+    const cLast = await api('/api/contacts?last_contact_after=2999-01-01T00:00:00.000Z');
+    check('Stage C contacts last-contact filter excludes stale contacts', cLast.status === 200 && !cLast.body.some((x) => x.id === cBuyer.body.id), JSON.stringify(cLast.body.map((x) => x.id)));
+    const cUpd = await api(`/api/contacts/${cStranger.body.id}`, { method: 'PUT', body: JSON.stringify({ labels: ['جديد'], notes: 'محدث' }) });
+    check('Stage C contact update', cUpd.status === 200 && cUpd.body.labels.includes('جديد') && cUpd.body.notes === 'محدث', JSON.stringify(cUpd.body));
+    const cUpdDup = await api(`/api/contacts/${cStranger.body.id}`, { method: 'PUT', body: JSON.stringify({ phone: '+967700000001' }) });
+    check('Stage C contact update to duplicate phone rejected (409)', cUpdDup.status === 409, JSON.stringify(cUpdDup.body));
+    const csvStageC = ['name,phone,labels,notes', 'مستورد أول,+967700000101,عميل متكرر,من CSV', 'مكرر موجود,+967700000001,عميل متكرر,', 'مكرر داخل الملف,+967700000101,,', 'صف سيئ,not-a-phone,,', 'مستورد ثان,+967700000102,,'].join('\n');
+    const cImp = await api('/api/contacts/import', { method: 'POST', body: JSON.stringify({ csv: csvStageC }) });
+    check('Stage C CSV import report: created/skipped/errors', cImp.status === 200 && cImp.body.created === 2 && cImp.body.skipped === 2 && cImp.body.errors === 1 && cImp.body.total === 5 && cImp.body.details.length === 5, JSON.stringify(cImp.body));
+    check('Stage C CSV import details name reasons', cImp.body.details.some((d) => d.status === 'skipped' && d.reason === 'duplicate_existing') && cImp.body.details.some((d) => d.status === 'skipped' && d.reason === 'duplicate_in_file') && cImp.body.details.some((d) => d.status === 'error'), JSON.stringify(cImp.body.details));
+    const expRes = await fetch(base + '/api/contacts/export', { headers: { Authorization: 'Bearer ' + token } });
+    const expText = await expRes.text();
+    check('Stage C contacts export is CSV with header + imported phone', expRes.status === 200 && /text\/csv/.test(expRes.headers.get('content-type') || '') && expText.includes('name,phone,labels') && expText.includes('+967700000101'), expText.slice(0, 300));
+    const viewerContacts = await apiAs(viewerToken, '/api/contacts');
+    check('Stage C viewer cannot list contacts (403, whatsapp family)', viewerContacts.status === 403, JSON.stringify(viewerContacts.body));
+    const viewerContactCreate = await apiAs(viewerToken, '/api/contacts', { method: 'POST', body: JSON.stringify({ phone: '+967700000103' }) });
+    check('Stage C viewer cannot create contacts (403)', viewerContactCreate.status === 403, JSON.stringify(viewerContactCreate.body));
+    const unauthContacts = await api('/api/contacts', { noAuth: true });
+    check('Stage C unauthenticated contacts rejected (401)', unauthContacts.status === 401, JSON.stringify(unauthContacts.body));
+    const bc = await api('/api/contacts/broadcast', { method: 'POST', body: JSON.stringify({}) });
+    check('Stage C no broadcast endpoint (404)', bc.status === 404, JSON.stringify(bc.body));
+    const cDel = await api(`/api/contacts/${cStranger.body.id}`, { method: 'DELETE' });
+    check('Stage C contact delete', cDel.status === 200 && cDel.body.ok === true, JSON.stringify(cDel.body));
+    const cGone = await api(`/api/contacts/${cStranger.body.id}`);
+    check('Stage C deleted contact returns 404', cGone.status === 404, JSON.stringify(cGone.body));
+    let builtHtml = '';
+    try { builtHtml = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'index.html'), 'utf8'); } catch {}
+    const waLabels = ['الربط والحسابات', 'الإنبكس', 'القوالب', 'الأتمتة', 'جهات الاتصال', 'الوسائط', 'الإعدادات'];
+    check('Stage C frontend build contains all 7 WhatsApp sub-interface labels', waLabels.every((l) => builtHtml.includes(l)), waLabels.filter((l) => !builtHtml.includes(l)).join(','));
+    check('Stage C frontend build contains contacts import/export strings', builtHtml.includes('استيراد CSV') && builtHtml.includes('تصدير CSV'), 'missing contacts strings');
+    // Stage C test-data cleanup (the harness also removes data.json + uploads on exit).
+    for (const cid of [cBuyer.body.id, cSeller.body.id, ...((cImp.body && cImp.body.created_ids) || [])]) { try { await api(`/api/contacts/${cid}`, { method: 'DELETE' }); } catch {} }
+
     mockServer.close();
   } catch (e) { failed++; console.log('FAIL exception', e); }
   console.log(`RESULT passed=${passed} failed=${failed}`);
   server.close(() => {
     try { fs.unlinkSync(path.join(__dirname, 'data.json')); } catch {}
+    try { fs.rmSync(path.join(__dirname, '..', 'uploads'), { recursive: true, force: true }); } catch {}
     process.exit(failed ? 1 : 0);
   });
 });

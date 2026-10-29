@@ -72,7 +72,12 @@ export interface Template {
   id: number; name: string; language: string; category: string; approval_status: string;
   // Meta status (Stage 5 contract). Absent on older backends / local-only rows.
   meta_status?: string; body?: string | null; buttons?: unknown; rejection_reason?: string | null;
-  label_ar?: string;
+  label_ar?: string; meta_template_id?: string | null;
+  // Stage A full template fields (header text/media/document, footer, samples).
+  header_type?: string | null; header_text?: string | null; header_link?: string | null;
+  footer?: string | null; sample_values?: string[];
+  // Computed by GET /api/whatsapp/templates/:id only (not on list rows).
+  placeholders?: number[]; preview?: string; sendable?: boolean; send_block_reason?: string | null;
 }
 // Stage 5 Meta WhatsApp contract types (frontend/src/api.ts implements them).
 // No token, secret, phone number, WABA ID, or other credential value is
@@ -85,14 +90,26 @@ export interface WhatsAppStatusFull {
   api_version?: string; app_base_url?: string | null;
   templates_total: number; templates_approved: number;
   templates_meta_approved?: number; meta_configured?: boolean;
+  embedded_signup?: { configured: boolean; app_id_configured: boolean; config_id_configured: boolean; app_secret_configured: boolean };
   wizard_steps?: WhatsAppWizardStep[];
+}
+export interface EmbeddedSignupConfig {
+  embedded_configured: boolean; app_id_configured: boolean; config_id_configured: boolean;
+  app_secret_configured: boolean; api_version?: string;
+  launch?: { dialog_base: string; dialog_path: string; client_id: string; config_id: string; response_type: string; override_default_response_type: boolean; scope: string } | null;
+}
+export interface EmbeddedSignupCallbackResult {
+  ok: boolean; tested?: boolean; persisted?: boolean; meta_user_id?: string | null;
+  display_name?: string | null; waba_id?: string | null; phone_number_id?: string | null;
+  configured?: Record<string, boolean>; message?: string; error?: string;
 }
 export interface WhatsAppTestTokenResult { ok: boolean; configured: boolean; meta_ok: boolean; dry_run?: boolean; error?: string; }
 export interface WhatsAppSendResult { ok: boolean; dry_run?: boolean; message_id?: string; wamid?: string; error?: string; }
 export interface WhatsAppTemplateSubmitResult { ok: boolean; dry_run?: boolean; meta_status?: string; template?: Template; error?: string; }
 export interface WhatsAppTemplateSyncResult { ok: boolean; dry_run?: boolean; updated?: number; error?: string; }
 export interface WhatsAppSendInput { to: string; body?: string; template_name?: string; language?: string; media?: unknown; }
-export interface WhatsAppTemplateCreateInput { name: string; category: 'UTILITY'; language: 'ar'; body: string; buttons?: string[]; }
+export interface WhatsAppTemplateCreateInput { name: string; category: 'UTILITY'; language: 'ar'; body: string; buttons?: string[]; header_type?: string | null; header_text?: string | null; header_link?: string | null; footer?: string | null; sample_values?: string[]; }
+export interface WhatsAppTemplateUpdateInput { label_ar?: string; header_type?: string | null; header_text?: string | null; header_link?: string | null; body?: string; footer?: string | null; buttons?: string[]; sample_values?: string[]; }
 export interface User {
   id: number; full_name: string; email: string; role: Role; is_active: boolean;
   department?: string | null; sections?: string[]; actions?: Record<string, string[]>;
@@ -115,6 +132,23 @@ export const ACTION_AR: Record<string, string> = {
   view: 'عرض', create: 'إنشاء', edit: 'تعديل', approve: 'اعتماد', manage: 'إدارة',
 };
 export const ACTIONS_LIST = ['view', 'create', 'edit', 'approve', 'manage'];
+// Stage C contacts: contract-scoped address book. Roles, contracts,
+// conversations, last_contact_at and utility eligibility are computed by the
+// backend from existing contracts/conversations/messages — never invented
+// here, and creating a contact never creates a contract or an audience.
+export interface Contact {
+  id: number; name: string; phone: string; labels: string[]; notes: string | null;
+  created_at: string; roles: string[];
+  contracts: { id: number; code: string; state: State; role: string }[];
+  conversations: { id: number; contract_id: number | null; party: string; status: string; unread_count: number; last_inbound_at: string | null }[];
+  last_contact_at: string | null; message_count: number;
+  utility_eligible: boolean; eligibility_basis: 'prior_inbound' | 'approved_template' | null;
+}
+export interface ContactImportDetail { row: number; phone: string | null; status: 'created' | 'skipped' | 'error'; reason: string | null; }
+export interface ContactImportReport {
+  ok: boolean; total: number; created: number; skipped: number; errors: number;
+  created_ids: number[]; details: ContactImportDetail[]; error_rows: ContactImportDetail[];
+}
 export interface AuditEntry {
   id: number; actor: string; entity: string; entity_id: number; action: string;
   details: Record<string, unknown>; created_at: string;
@@ -145,7 +179,12 @@ export const STEP_TYPES = [
 
 export const TRIGGER_TYPES = [
   { type: 'keyword', ar: 'كلمة مفتاحية' },
+  { type: 'first_message', ar: 'أول رسالة' },
+  { type: 'button_reply', ar: 'رد زر/قائمة' },
   { type: 'contract-event', ar: 'حدث عقد' },
+  { type: 'business_hours', ar: 'أثناء الدوام' },
+  { type: 'away', ar: 'خارج الدوام' },
+  { type: 'fallback', ar: 'احتياطي بعد رسالتين غير مفهومتين' },
   { type: 'manual', ar: 'تشغيل يدوي' },
 ] as const;
 
