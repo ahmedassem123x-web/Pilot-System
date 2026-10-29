@@ -4,7 +4,7 @@ import { WhatsAppWorkspace } from './whatsapp-workspace';
 import { Badge, Card, Empty, Field, LocalNote, fmt, stateTone } from './components';
 import { IconChat, IconCheckSquare, IconDoc, IconInbox, IconPower, IconTemplate } from './icons';
 import {
-  ACTION_AR, DEPARTMENTS, ROLE_AR, ROLES, SECTIONS_AR, SECTIONS_LIST, STATE_AR, TEMPLATE_AR, TRANSITIONS,
+  ACTION_AR, CONTRACT_TYPE_AR, DEPARTMENTS, ROLE_AR, ROLES, SECTIONS_AR, SECTIONS_LIST, STATE_AR, TEMPLATE_AR, TRANSITIONS,
   type AuditEntry, type Contact, type ContactImportReport, type Contract, type Conversation, type EmbeddedSignupConfig, type MeUser, type Message, type State, type Template, type User, type Workflow,
 } from './types';
 
@@ -86,10 +86,14 @@ export function Dashboard({ b, reload, onOpenDesigner }: { b: Bundle; reload: ()
 export function Contracts({ b, reload, sub }: { b: Bundle; reload: () => void; sub?: 'list' | 'new' | 'versions' }) {
   const showCreate = !sub || sub === 'new';
   const showList = !sub || sub === 'list';
-  const [form, setForm] = useState({ buyer_phone: '', seller_phone: '', product_description: '', amount: '', currency: 'SAR', delivery_point: '' });
+  const [form, setForm] = useState({ buyer_phone: '', seller_phone: '', product_description: '', amount: '', currency: 'SAR', delivery_point: '', contract_type: 'general', quantity: '', specifications: '', service_duration: '', delivery_stages: '' });
+  const [signing, setSigning] = useState<{ pdf_sent_at: string | null; buyer_signed: boolean; seller_signed: boolean; both_signed: boolean } | null>(null);
+  const [signParty, setSignParty] = useState<'buyer' | 'seller'>('buyer');
+  const [signFile, setSignFile] = useState('');
   const [msg, setMsg] = useState('');
   const [filter, setFilter] = useState('all');
   const [selId, setSelId] = useState<number | null>(null);
+  useEffect(() => { if (selId) api.contractSigning(selId).then(setSigning).catch(() => setSigning(null)); else setSigning(null); }, [selId]);
   const [fiRef, setFiRef] = useState('');
   const [actor, setActor] = useState('operator');
   const [amend, setAmend] = useState({ product_description: '', amount: '', delivery_point: '' });
@@ -100,8 +104,8 @@ export function Contracts({ b, reload, sub }: { b: Bundle; reload: () => void; s
   async function create(e: React.FormEvent) {
     e.preventDefault(); setMsg('');
     try {
-      const c = await api.createContract({ buyer_phone: form.buyer_phone, seller_phone: form.seller_phone, product_description: form.product_description, amount: Number(form.amount), currency: form.currency, delivery_point: form.delivery_point || undefined });
-      setMsg(`تم إنشاء العقد ${c.code} بحالة مسودة.`); setForm({ buyer_phone: '', seller_phone: '', product_description: '', amount: '', currency: 'SAR', delivery_point: '' }); reload();
+      const c = await api.createContract({ buyer_phone: form.buyer_phone, seller_phone: form.seller_phone, product_description: form.product_description, amount: Number(form.amount), currency: form.currency, delivery_point: form.delivery_point || undefined, contract_type: form.contract_type, quantity: form.quantity.trim() || undefined, specifications: form.specifications.trim() || undefined, service_duration: form.service_duration.trim() || undefined, delivery_stages: form.delivery_stages.trim() || undefined });
+      setMsg(`تم إنشاء العقد ${c.code} بحالة مسودة — نوعه: ${CONTRACT_TYPE_AR[form.contract_type]}.`); setForm({ buyer_phone: '', seller_phone: '', product_description: '', amount: '', currency: 'SAR', delivery_point: '', contract_type: 'general', quantity: '', specifications: '', service_duration: '', delivery_stages: '' }); reload();
     } catch (err) { setMsg('خطأ: ' + (err as Error).message); }
   }
   async function go(to: State) {
@@ -125,6 +129,11 @@ export function Contracts({ b, reload, sub }: { b: Bundle; reload: () => void; s
         <Field label="المبلغ"><input required type="number" min="0" step="any" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} /></Field>
         <Field label="العملة"><select value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value })}><option>SAR</option><option>YER</option><option>USD</option></select></Field>
         <Field label="نقطة التسليم (اختياري)"><input value={form.delivery_point} onChange={(e) => setForm({ ...form, delivery_point: e.target.value })} /></Field>
+        <Field label="نوع العقد — يحدد صيغة PDF"><select value={form.contract_type} onChange={(e) => setForm({ ...form, contract_type: e.target.value })}><option value="goods_sale">بيع بضاعة</option><option value="service">تقديم خدمة</option><option value="supply">توريد</option><option value="general">تنفيذ صفقة عام</option></select></Field>
+        <Field label="الكمية (بيع بضاعة)"><input value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} placeholder="مثال: 50 قطعة" /></Field>
+        <Field label="المواصفات (بيع بضاعة)"><input value={form.specifications} onChange={(e) => setForm({ ...form, specifications: e.target.value })} /></Field>
+        <Field label="مدة الخدمة (تقديم خدمة)"><input value={form.service_duration} onChange={(e) => setForm({ ...form, service_duration: e.target.value })} placeholder="مثال: 30 يوماً" /></Field>
+        <Field label="مراحل/دفعات التوريد (توريد)"><input value={form.delivery_stages} onChange={(e) => setForm({ ...form, delivery_stages: e.target.value })} placeholder="مثال: دفعتان — 60% ثم 40%" /></Field>
         <button className="btn" type="submit">إنشاء العقد</button>
       </form>
       <div className="btn-row">
@@ -138,13 +147,13 @@ export function Contracts({ b, reload, sub }: { b: Bundle; reload: () => void; s
 
     {showList && <Card title="العقود" actions={<select value={filter} onChange={(e) => setFilter(e.target.value)} className="inline-select"><option value="all">كل الحالات</option>{Object.entries(STATE_AR).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>}>
       {list.length === 0 ? <Empty text="لا عقود مطابقة." /> :
-        <table><thead><tr><th>الكود</th><th>المشتري / البائع</th><th>المنتج</th><th>المبلغ</th><th>الحالة</th><th></th></tr></thead>
+        <div className="table-wrap"><table><thead><tr><th>الكود</th><th>النوع</th><th>المشتري / البائع</th><th>المنتج</th><th>المبلغ</th><th>الحالة</th><th></th></tr></thead>
         <tbody>{list.map((c) => <tr key={c.id} className={selId === c.id ? 'row-sel' : ''}>
-          <td><b>{c.code}</b>{c.is_demo && <span className="wa-demo-badge"> تجريبي</span>}</td><td><div className="small">{c.buyer_phone}</div><div className="small">{c.seller_phone}</div></td>
+          <td><b>{c.code}</b>{c.is_demo && <span className="wa-demo-badge"> تجريبي</span>}</td><td>{CONTRACT_TYPE_AR[c.contract_type || 'general']}</td><td><div className="small">{c.buyer_phone}</div><div className="small">{c.seller_phone}</div></td>
           <td>{c.product_description}</td><td>{c.amount} {c.currency}</td>
           <td><Badge tone={stateTone(c.state)}>{STATE_AR[c.state]}</Badge></td>
           <td><button className="btn small" onClick={() => { setSelId(c.id); setMsg(''); }}>تفاصيل</button> <button className="btn small ghost" onClick={() => openAmend(c)}>تعديل / إصدارات</button> <button className="btn small ghost" onClick={async () => { try { const blob = await api.downloadContractPdf(c.id); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `contract-${c.code}.pdf`; a.click(); URL.revokeObjectURL(url); setMsg(`تم تنزيل PDF العقد ${c.code}.`); } catch (err) { setMsg('خطأ في تنزيل PDF: ' + (err as Error).message); } }}>تنزيل PDF</button></td>
-        </tr>)}</tbody></table>}
+        </tr>)}</tbody></table></div>}
     </Card>}
 
     {showList && sel && <Card title={`تفاصيل ${sel.code}${sel.is_demo ? ' — تجريبي' : ''}`} sub={`بصمة البنود (SHA-256): ${sel.clause_fingerprint}`} actions={<button className="btn small" onClick={async () => { try { const blob = await api.downloadContractPdf(sel.id); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `contract-${sel.code}.pdf`; a.click(); URL.revokeObjectURL(url); setMsg(`تم تنزيل PDF العقد ${sel.code}.`); } catch (err) { setMsg('خطأ في تنزيل PDF: ' + (err as Error).message); } }}>تنزيل العقد PDF</button>}>
@@ -153,6 +162,16 @@ export function Contracts({ b, reload, sub }: { b: Bundle; reload: () => void; s
         <p><b>المشتري:</b> {sel.buyer_phone}</p><p><b>البائع:</b> {sel.seller_phone}</p>
         <p><b>نقطة التسليم:</b> {sel.delivery_point || '—'}</p><p><b>أُنشئ:</b> {fmt(sel.created_at)}</p>
         {sel.version !== undefined && <p><b>إصدار العقد (من الخادم):</b> v{sel.version}</p>}
+      </div>
+      <h3>نوع العقد وصيغة PDF</h3>
+      <p><b>النوع:</b> {CONTRACT_TYPE_AR[sel.contract_type || 'general']}{sel.quantity ? ` — الكمية: ${sel.quantity}` : ''}{sel.specifications ? ` — المواصفات: ${sel.specifications}` : ''}{sel.service_duration ? ` — مدة الخدمة: ${sel.service_duration}` : ''}{sel.delivery_stages ? ` — مراحل التوريد: ${sel.delivery_stages}` : ''}</p>
+      <h3>تدفق التوقيع على PDF</h3>
+      <p className="small">الخطوات: 1) نزّل PDF العقد من الأعلى وأرسله للطرف. 2) يملأ الطرف بياناته ويوقّع. 3) يرسل لنا PDF الموقّع فنرفعه هنا كنسخة منفصلة — الأصل المقفل لا يُستبدل أبداً. {signing ? <>حالة الإرسال: {signing.pdf_sent_at ? `أُرسل ${signing.pdf_sent_at.slice(0, 10)}` : 'لم يُسجَّل إرساله بعد'} • توقيع المشتري: {signing.buyer_signed ? 'موقّع' : 'بانتظار'} • توقيع البائع: {signing.seller_signed ? 'موقّع' : 'بانتظار'} • {signing.both_signed ? 'موقّع من الطرفين' : 'لم يكتمل التوقيع بعد'}.</> : 'جارٍ جلب حالة التوقيع…'}</p>
+      <div className="btn-row">
+        <button className="btn small" onClick={async () => { try { const r = await api.sendContractPdf(sel.id); setMsg(r.already ? 'إرسال PDF مسجَّل أصلاً لهذا العقد.' : 'تم تسجيل إرسال PDF العقد — بانتظار النسخة الموقعة.'); const sg = await api.contractSigning(sel.id); setSigning(sg); reload(); } catch (err) { setMsg('خطأ: ' + (err as Error).message); } }}>تسجيل إرسال PDF</button>
+        <select className="inline-select" value={signParty} onChange={(e) => setSignParty(e.target.value as 'buyer' | 'seller')}><option value="buyer">نسخة موقعة من المشتري</option><option value="seller">نسخة موقعة من البائع</option></select>
+        <input className="inline-input" placeholder="اسم ملف PDF الموقّع، مثال: signed-buyer.pdf" value={signFile} onChange={(e) => setSignFile(e.target.value)} />
+        <button className="btn small ghost" onClick={async () => { if (!signFile.trim()) { setMsg('أدخل اسم ملف PDF الموقّع أولاً.'); return; } try { await api.uploadContractFile(sel.id, { filename: signFile.trim(), kind: signParty === 'buyer' ? 'buyer_signed' : 'seller_signed' }); setMsg('تم تسجيل النسخة الموقعة كإصدار منفصل — الأصل لم يتغير.'); setSignFile(''); const sg = await api.contractSigning(sel.id); setSigning(sg); reload(); } catch (err) { setMsg('خطأ: ' + (err as Error).message); } }}>تسجيل النسخة الموقعة</button>
       </div>
       <h3>الانتقالات المتاحة من «{STATE_AR[sel.state]}»</h3>
       {TRANSITIONS[sel.state].length === 0 ? <p className="muted">حالة نهائية — لا انتقالات متاحة.</p> : <>
@@ -1052,8 +1071,8 @@ export function WhatsApp({ b, reload, me, sub }: { b: Bundle; reload: () => void
     finally { setSending(false); }
   }
   return <>
-    <EmbeddedSignupCard canEdit={canEdit} />
     <Card title={`معالج ربط واتساب — ${steps.length} خطوات`} sub={`مكتمل: ${doneCount} من ${steps.length}${blockedCount ? ` — متعذّر: ${blockedCount}` : ''} — الحالة من الخادم (GET /api/whatsapp/status)، وليست من المتصفح. لا يوجد هنا أي حقل لإدخال رمز أو سر.`}>
+      <EmbeddedSignupCard canEdit={canEdit} />
       {!status && <p className="muted">{err ? 'تعذر جلب حالة الربط: ' + err : 'جارٍ جلب حالة الربط من الخادم…'}</p>}
       {status && !status.wizard_steps && <p className="local-note">الخادم الحالي لا يرسل wizard_steps بعد — الخطوات أدناه مشتقة من الحقول القديمة فقط (بانتظار ما لم يثبته الخادم)، وستُعرض حالة الخادم الحقيقية فور توفر الـ endpoint الجديد.</p>}
       <div className="btn-row">
@@ -1098,20 +1117,6 @@ export function WhatsApp({ b, reload, me, sub }: { b: Bundle; reload: () => void
       </ol>
       <div className="btn-row"><button className="btn ghost" onClick={refresh}>تحديث الحالة من الخادم</button></div>
       <p className="muted">قواعد ثابتة: لا محفظة داخلية، لا متجر، لا إجراء مالي آلي، واجهة العميل واتساب فقط، رقم مخصص للخدمة، بدون وسيط (BSP)، وكل الحسابات باسم العميل.</p>
-    </Card>
-    <Card title="حالة Webhook" sub="حالة فقط — لا تُعرض أي قيمة سرية هنا أبداً. (كانت واجهة مستقلة؛ الآن هي جزء من «الربط والحسابات».)">
-      <p>الخادم: {b.healthOk ? <Badge tone="ok">متصل</Badge> : <Badge tone="bad">غير متصل</Badge>}</p>
-      {status ? <ul>
-        <li>رمز التحقق مضبوط: {status.webhook_verify_configured ? 'نعم' : 'لا'}</li>
-        <li>التحقق بتوقيع HMAC مفعّل: {status.webhook_hmac_configured ? 'نعم' : 'لا'}</li>
-        <li>رمز الوصول مضبوط: {status.whatsapp_access_configured ? 'نعم' : 'لا'}</li>
-        <li>رقم الهاتف مضبوط: {status.phone_number_configured === undefined ? 'غير معروف' : status.phone_number_configured ? 'نعم' : 'لا'}</li>
-        <li>حساب WABA مضبوط: {status.waba_configured === undefined ? 'غير معروف' : status.waba_configured ? 'نعم' : 'لا'}</li>
-        <li>إصدار API: {status.api_version || 'غير معروف'}</li>
-        <li>قوالب معتمدة محلياً: {status.templates_approved} من {status.templates_total}</li>
-        <li>قوالب معتمدة لدى Meta: {status.templates_meta_approved === undefined ? 'غير معروف' : `${status.templates_meta_approved} من ${status.templates_total}`}</li>
-      </ul> : <p className="muted">{err ? 'تعذر جلب حالة Webhook: ' + err : 'جارٍ الجلب…'}</p>}
-      <p className="muted">نقطة Webhook: <code>GET/POST /api/whatsapp/webhook</code> — التحقق GET يقارن رمز Meta، والوارد POST يتحقق من توقيع <code>x-hub-signature-256</code> عند ضبط السر. العنوان الكامل: <code>{webhookUrl}</code></p>
     </Card>
   </>;
 }
@@ -1174,8 +1179,8 @@ export function Audit({ b }: { b: Bundle }) {
   return <><ReportsCard />
   <Card title="سجل التدقيق (قراءة فقط)" sub="سجل إلحاقي — لا توجد أزرار تعديل أو حذف هنا أبداً، والخادم نفسه لا يعدّله ولا يحذف منه." actions={<><select className="inline-select" value={entity} onChange={(e) => setEntity(e.target.value)}><option value="all">كل الكيانات</option>{[...new Set(b.audit.map((a) => a.entity))].map((e2) => <option key={e2} value={e2}>{e2}</option>)}</select> <input className="inline-input" placeholder="بحث بالمنفّذ أو الإجراء أو الرقم" value={q} onChange={(e) => setQ(e.target.value)} /></>}>
     {list.length === 0 ? <Empty text="لا سجلات تدقيق بعد." /> :
-      <table><thead><tr><th>الوقت</th><th>المنفّذ</th><th>الكيان</th><th>الرقم</th><th>الإجراء</th><th>التفاصيل</th></tr></thead>
-      <tbody>{list.map((a) => <tr key={a.id}><td className="small">{fmt(a.created_at)}</td><td>{a.actor}</td><td>{a.entity}</td><td>{a.entity_id}</td><td>{a.action}</td><td className="small">{JSON.stringify(a.details || {})}</td></tr>)}</tbody></table>}
+      <div className="table-wrap"><table><thead><tr><th>الوقت</th><th>المنفّذ</th><th>الكيان</th><th>الرقم</th><th>الإجراء</th><th>التفاصيل</th></tr></thead>
+      <tbody>{list.map((a) => <tr key={a.id}><td className="small">{fmt(a.created_at)}</td><td>{a.actor}</td><td>{a.entity}</td><td>{a.entity_id}</td><td>{a.action}</td><td className="small">{JSON.stringify(a.details || {})}</td></tr>)}</tbody></table></div>}
   </Card></>;
 
 }

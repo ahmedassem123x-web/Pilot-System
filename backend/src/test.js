@@ -97,6 +97,36 @@ server.listen(PORT, async () => {
     check('file metadata stored (no bytes)', file.status === 201 && file.body.kind === 'buyer_signed' && !('content' in file.body) && !('data' in file.body), JSON.stringify(file.body));
     const files = await api(`/api/contracts/${id}/attachments`);
     check('attachments list', files.status === 200 && files.body.length === 1 && files.body[0].filename === 'contract-signed.pdf');
+    // ---- Continuation round: 4 contract types + signed-PDF flow ----
+    const badType = await api('/api/contracts', { method: 'POST', body: JSON.stringify({ buyer_phone: '+967700000011', seller_phone: '+967700000012', product_description: 'x', amount: 10, contract_type: 'bogus' }) });
+    check('invalid contract_type rejected (400)', badType.status === 400, JSON.stringify(badType.body));
+    const typed = {};
+    for (const [t, extra] of [['goods_sale', { quantity: '50 قطعة', specifications: 'موديل A' }], ['service', { service_duration: '30 يوماً' }], ['supply', { delivery_stages: 'دفعتان' }], ['general', {}]]) {
+      const r = await api('/api/contracts', { method: 'POST', body: JSON.stringify({ buyer_phone: '+967700000021', seller_phone: '+967700000022', product_description: 'عقد ' + t, amount: 20, contract_type: t, ...extra }) });
+      typed[t] = r.body.id;
+      check('contract created with type ' + t, r.status === 201 && r.body.contract_type === t, JSON.stringify(r.body));
+    }
+    const pdfGoods = await fetch(base + `/api/contracts/${typed.goods_sale}/pdf`, { headers: { Authorization: 'Bearer ' + token } });
+    const pdfText = await pdfGoods.text();
+    check('goods PDF generated (200, PDF bytes)', pdfGoods.status === 200 && pdfText.startsWith('%PDF'), pdfGoods.status + ' ' + pdfText.slice(0, 20));
+    const sign0 = await api(`/api/contracts/${typed.service}/signing`);
+    check('signing status starts unsigned and unsent', sign0.status === 200 && sign0.body.buyer_signed === false && sign0.body.seller_signed === false && sign0.body.both_signed === false && sign0.body.pdf_sent_at === null, JSON.stringify(sign0.body));
+    const sent = await api(`/api/contracts/${typed.service}/send-pdf`, { method: 'POST' });
+    check('send-pdf records first send', sent.status === 200 && sent.body.already === false && !!sent.body.contract.pdf_sent_at, JSON.stringify(sent.body));
+    const sentAgain = await api(`/api/contracts/${typed.service}/send-pdf`, { method: 'POST' });
+    check('send-pdf second call is idempotent (already)', sentAgain.status === 200 && sentAgain.body.already === true, JSON.stringify(sentAgain.body));
+    await api(`/api/contracts/${typed.service}/files`, { method: 'POST', body: JSON.stringify({ filename: 'signed-buyer.pdf', kind: 'buyer_signed' }) });
+    const sign1 = await api(`/api/contracts/${typed.service}/signing`);
+    check('one signed after buyer upload (buyer true, seller false, not both)', sign1.body.buyer_signed === true && sign1.body.seller_signed === false && sign1.body.both_signed === false, JSON.stringify(sign1.body));
+    await api(`/api/contracts/${typed.service}/files`, { method: 'POST', body: JSON.stringify({ filename: 'signed-seller.pdf', kind: 'seller_signed' }) });
+    const sign2 = await api(`/api/contracts/${typed.service}/signing`);
+    check('both signed after seller upload', sign2.body.buyer_signed === true && sign2.body.seller_signed === true && sign2.body.both_signed === true, JSON.stringify(sign2.body));
+    const signMissing = await api('/api/contracts/999999/signing');
+    check('signing missing contract returns 404', signMissing.status === 404, JSON.stringify(signMissing.body));
+    const signUnauth = await api(`/api/contracts/${typed.service}/signing`, { noAuth: true });
+    check('signing requires auth (401)', signUnauth.status === 401, JSON.stringify(signUnauth.body));
+    const pdfUnauth2 = await fetch(base + `/api/contracts/${typed.general}/pdf`);
+    check('contract PDF requires auth', pdfUnauth2.status === 401, String(pdfUnauth2.status));
 
     // ---- New: owner-protection guard ----
     const owner1Pass = genPass();
@@ -309,13 +339,14 @@ server.listen(PORT, async () => {
     check('inbound message stored in buyer conversation', buyerMsgs.body.some((m) => m.wamid === 'wamid.in.1' && m.body === 'مرحبا، أريد الاستفسار' && m.direction === 'in'), JSON.stringify(buyerMsgs.body));
 
     // Inbound to a general conversation (unknown phone, no contract created).
+    const contractsBeforeGen = await api('/api/contracts');
     const genRaw = JSON.stringify(inboundPayload('967799999999', 'wamid.gen.1', 'سؤال عام'));
     const genRes = await webhookRaw(genRaw, hmacFor(genRaw));
     check('webhook general inbound accepted (200)', genRes.status === 200 && genRes.body.messages === 1, JSON.stringify(genRes.body));
     const genConvs = await api('/api/conversations?party=general');
     check('inbound from unknown phone creates GENERAL conversation, no contract', genConvs.body.some((c) => c.contract_id === null && c.party === 'general'), JSON.stringify(genConvs.body));
     const contractsAfterGen = await api('/api/contracts');
-    check('webhook never creates a contract automatically', contractsAfterGen.body.length === 1, String(contractsAfterGen.body.length));
+    check('webhook never creates a contract automatically', contractsAfterGen.body.length === contractsBeforeGen.body.length, String(contractsAfterGen.body.length) + ' vs ' + contractsBeforeGen.body.length);
 
     // wamid dedup: resending the same inbound payload stores nothing new.
     const beforeDup = (await api(`/api/messages?conversation_id=${buyerConvId}`)).body.length;

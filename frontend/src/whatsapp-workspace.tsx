@@ -8,7 +8,7 @@
 // Internal notes render as centred system notices, never as bubbles.
 // The demo conversation (if created) is labelled everywhere as test-only,
 // has no real phone number and no contract, and is never sent to Meta.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, type AutomationLog, type WhatsAppUpload } from './api';
 import { Badge, Empty, Field, fmt } from './components';
 import { TEMPLATE_AR, type Contact, type QuickReply, type Contract, type Conversation, type MeUser, type Message, type Template, type User, type Workflow } from './types';
@@ -70,6 +70,9 @@ export function WhatsAppWorkspace({ b, reload, me }: { b: WorkspaceBundle; reloa
   const [internal, setInternal] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [macroId, setMacroId] = useState<number | ''>('');
+  const [attachKind, setAttachKind] = useState<'image' | 'video' | 'document' | 'audio' | null>(null);
+  const [showQr, setShowQr] = useState(false);
+  const attachRef = useRef<HTMLInputElement>(null);
   const [tagsInput, setTagsInput] = useState('');
   const [replyToId, setReplyToId] = useState<number | null>(null);
   const [jumpId, setJumpId] = useState<number | null>(null);
@@ -282,20 +285,24 @@ export function WhatsAppWorkspace({ b, reload, me }: { b: WorkspaceBundle; reloa
           })}</div>)}</>; })()}
         </div>
         <div className="wa-composer">
-          <div className="btn-row">
-            <button title="إرسال نص حر (داخل نافذة 24 ساعة فقط)" className={`btn small ${mode === 'text' ? '' : 'ghost'}`} onClick={() => setMode('text')}>نص</button>
-            <button title="إرسال قالب واتساب معتمد" className={`btn small ${mode === 'template' ? '' : 'ghost'}`} onClick={() => setMode('template')}>قالب</button>
-            <button title="إرفاق وسائط (حتى 16 ميجابايت)" className={`btn small ${mode === 'media' ? '' : 'ghost'}`} onClick={() => setMode('media')}>وسائط</button>
-            <label className="check"><input type="checkbox" checked={internal} onChange={(e) => setInternal(e.target.checked)} /> ملاحظة داخلية فقط (لا تُرسل أبداً)</label>
-          </div>
           {replyToId && <p className="wa-quote">رد مقتبس على رسالة #{replyToId} — {(thread.find((x) => x.id === replyToId)?.body || thread.find((x) => x.id === replyToId)?.template_name || '').slice(0, 80)} <button className="btn small ghost" onClick={() => setReplyToId(null)}>إلغاء الاقتباس</button></p>}
           {!windowOpen && !internal && !sel.is_demo && <p className="local-note">خارج نافذة 24 ساعة: النص الحر والوسائط والأزرار مرفوضة — أرسل قالباً معتمداً فقط.</p>}
           {mode === 'template' && <Field label="القالب (من مكتبة القوالب الواحدة)"><select value={template} onChange={(e) => setTemplate(e.target.value)}><option value="">— اختر قالباً —</option>{b.templates.map((t) => <option key={t.id} value={t.name}>{t.name} ({TEMPLATE_AR[t.name] || t.name}) — محلي: {t.approval_status}، Meta: {t.meta_status || '—'}</option>)}</select></Field>}
-          {mode === 'media' && <Field label="ملف (حتى 16 ميجابايت — صورة/فيديو/صوت/مستند)"><input type="file" onChange={(e) => setFile(e.target.files?.[0] || null)} /></Field>}
-          {mode !== 'media' && <Field label={internal ? 'نص الملاحظة الداخلية' : mode === 'template' ? 'ملاحظة (لا تُرسل مع القالب)' : 'نص الرد — اكتب / لعرض الردود السريعة'}><textarea rows={3} value={body} onChange={(e) => setBody(e.target.value)} placeholder={mode === 'template' ? 'اختياري' : 'اكتب الرد هنا…'} /></Field>}
-          {qrMatches.length > 0 && <div className="btn-row">{qrMatches.map((r) => <button key={r.id} className="btn small ghost" onClick={() => setBody(r.body)}>{r.shortcut}</button>)}</div>}
+          {file && <p className="small">الملف المختار: {file.name} ({(file.size / 1024).toFixed(0)} ك.ب)</p>}
+          <div className="wa-composer-bar">
+            <input type="file" ref={attachRef} className="wa-hidden-file" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt" onChange={(e) => { setFile(e.target.files?.[0] || null); setMode('media'); }} />
+            <button title="إرفاق صورة" className="wa-attach-btn" onClick={() => { setAttachKind('image'); setMode('media'); attachRef.current?.click(); }}>🖼️</button>
+            <button title="إرفاق فيديو" className="wa-attach-btn" onClick={() => { setAttachKind('video'); setMode('media'); attachRef.current?.click(); }}>🎬</button>
+            <button title="إرفاق مستند" className="wa-attach-btn" onClick={() => { setAttachKind('document'); setMode('media'); attachRef.current?.click(); }}>📄</button>
+            <button title="إرفاق صوت" className="wa-attach-btn" onClick={() => { setAttachKind('audio'); setMode('media'); attachRef.current?.click(); }}>🎙️</button>
+            <button title="إرسال قالب" className="wa-attach-btn" onClick={() => setMode('template')}>📋</button>
+            <button title="ردود سريعة" className="wa-attach-btn" onClick={() => setShowQr(!showQr)}>/</button>
+            <button title="ملاحظة داخلية فقط — لا تُرسل أبداً" className={`wa-attach-btn ${internal ? 'active' : ''}`} onClick={() => setInternal(!internal)}>📝</button>
+            <input className="wa-composer-input" value={body} onChange={(e) => setBody(e.target.value)} placeholder={internal ? 'نص الملاحظة الداخلية…' : mode === 'template' ? 'ملاحظة (لا تُرسل مع القالب)' : mode === 'media' ? 'تعليق مع الوسائط…' : 'اكتب الرد هنا… اكتب / للردود السريعة'} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
+            <button title="إرسال الرد أو حفظ الملاحظة الداخلية" className="wa-send-btn" disabled={!canEdit} onClick={send}>{internal ? 'حفظ' : '➤'}</button>
+          </div>
+          {(showQr || qrMatches.length > 0) && <div className="btn-row">{(qrMatches.length > 0 ? qrMatches : quickReplies).map((r) => <button key={r.id} className="btn small ghost" onClick={() => { setBody(r.body); setShowQr(false); }}>{r.shortcut}</button>)}</div>}
           <div className="btn-row">
-            <button title="إرسال الرد أو حفظ الملاحظة الداخلية" className="btn" disabled={!canEdit} onClick={send}>{internal ? 'حفظ ملاحظة داخلية' : mode === 'media' ? 'رفع وإرسال الوسائط' : 'إرسال ✓'}</button>
             <select className="inline-select" value={macroId} onChange={(e) => setMacroId(e.target.value ? Number(e.target.value) : '')}><option value="">تشغيل ماكرو بضغطة واحدة…</option>{macros.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</select>
             <button className="btn small ghost" disabled={!canEdit || macroId === ''} onClick={async () => { try { const r = await api.runMacro(Number(macroId), sel.id); setMsg(r.ok ? `تم تنفيذ الماكرو — ${r.outcome || 'done'}.` : `لم يُنفَّذ — ${r.blocked_reason || ''}.`); reload(); } catch (err) { setMsg('خطأ: ' + (err as Error).message); } }}>تشغيل الماكرو</button>
           </div>

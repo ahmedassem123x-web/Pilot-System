@@ -47,11 +47,17 @@ export const ROLE_AR: Record<Role, string> = {
   viewer: 'مشاهد فقط',
 };
 
+export const CONTRACT_TYPE_AR: Record<string, string> = {
+  goods_sale: 'بيع بضاعة', service: 'تقديم خدمة', supply: 'توريد', general: 'تنفيذ صفقة عام',
+};
 export interface Contract {
   id: number; code: string; buyer_phone: string; seller_phone: string;
   product_description: string; amount: number; currency: string;
   delivery_point: string | null; state: State; clause_fingerprint: string;
   created_at: string; version?: number; is_demo?: boolean;
+  contract_type?: string; quantity?: string | null; specifications?: string | null;
+  service_duration?: string | null; delivery_stages?: string | null;
+  pdf_sent_at?: string | null; pdf_sent_by?: string | null;
 }
 export interface Conversation { id: number; contract_id: number | null; party: string; phone?: string | null; display_name?: string | null; is_demo?: boolean; automation_handed_off?: boolean; status: string; unread_count: number; assigned_to?: string | null; labels?: string[]; last_inbound_at?: string | null; pinned?: boolean; }
 export interface Message {

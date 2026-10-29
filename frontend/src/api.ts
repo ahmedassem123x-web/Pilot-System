@@ -173,8 +173,11 @@ export const api = {
     req<Template>(`/api/whatsapp/templates/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
   connectionChecklist: () => req<ChecklistStep[]>('/api/connection-checklist'),
   contracts: () => req<Contract[]>('/api/contracts'),
-  createContract: (b: { buyer_phone: string; seller_phone: string; product_description: string; amount: number; currency: string; delivery_point?: string }) =>
+  createContract: (b: { buyer_phone: string; seller_phone: string; product_description: string; amount: number; currency: string; delivery_point?: string; contract_type?: string; quantity?: string; specifications?: string; service_duration?: string; delivery_stages?: string }) =>
     req<Contract>('/api/contracts', { method: 'POST', body: JSON.stringify(b) }),
+  contractSigning: (id: number) => req<{ contract_id: number; code: string; contract_type: string; pdf_sent_at: string | null; pdf_sent_by: string | null; buyer_signed: boolean; seller_signed: boolean; both_signed: boolean; files: { id: number; filename: string; kind: string }[] }>(`/api/contracts/${id}/signing`),
+  sendContractPdf: (id: number) => req<{ ok: boolean; already: boolean; contract: Contract }>(`/api/contracts/${id}/send-pdf`, { method: 'POST' }),
+  uploadContractFile: (id: number, b: { filename: string; kind: string }) => req<{ id: number; filename: string; kind: string }>(`/api/contracts/${id}/files`, { method: 'POST', body: JSON.stringify(b) }),
   transition: (id: number, b: { to: string; financial_reference?: string; actor?: string }) =>
     req<Contract>(`/api/contracts/${id}/transition`, { method: 'POST', body: JSON.stringify(b) }),
   contractVersions: (id: number) => req<Record<string, unknown>[]>(`/api/contracts/${id}/versions`),

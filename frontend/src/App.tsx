@@ -110,32 +110,15 @@ const TOP_TABS: TopTab[] = [
   { key: 'dashboard', label: 'لوحة القيادة', icon: IconGrid, main: 'dashboard', section: 'dashboard' },
   { key: 'contracts', label: 'العقود والمعاملات', icon: IconDoc, main: 'contracts', sub: 'list', section: 'contracts' },
   { key: 'inbox', label: 'الإنبكس', icon: IconChat, main: 'inbox', section: 'inbox' },
-  { key: 'tasks', label: 'مهام التشغيل', icon: IconCheckSquare, main: 'contracts', sub: 'tasks', section: 'tasks' },
-  { key: 'designer', label: 'منشئ التدفقات', icon: IconWorkflow, main: 'whatsapp', sub: 'designer', section: 'whatsapp' },
-  { key: 'templates', label: 'قوالب واتساب', icon: IconTemplate, main: 'whatsapp', sub: 'templates', section: 'whatsapp' },
-  { key: 'contacts', label: 'جهات الاتصال', icon: IconUsers, main: 'whatsapp', sub: 'contacts', section: 'whatsapp' },
-  { key: 'media', label: 'الوسائط', icon: IconDoc, main: 'whatsapp', sub: 'media', section: 'whatsapp' },
+  { key: 'whatsapp', label: 'واتساب', icon: IconLink, main: 'whatsapp', sub: 'overview', section: 'whatsapp' },
   { key: 'automation', label: 'الأتمتة والتقارير', icon: IconBolt, main: 'automation', sub: 'rules', section: 'automation' },
-  { key: 'audit', label: 'التدقيق', icon: IconReport, main: 'audit', section: 'audit' },
   { key: 'users', label: 'المستخدمون والأدوار', icon: IconUsers, main: 'users', sub: 'list', section: 'users' },
-  { key: 'linking', label: 'الربط والإعداد', icon: IconLink, main: 'whatsapp', sub: 'connection', section: 'whatsapp' },
-  { key: 'ai', label: 'مساعد ذكي', icon: IconWorkflow, main: 'ai', sub: 'dashboard', section: 'automation' },
-  { key: 'team', label: 'الفريق', icon: IconUsers, main: 'team', sub: 'performance', section: 'users' },
-  { key: 'tickets', label: 'تذاكري', icon: IconInbox, main: 'tickets', section: 'tasks' },
-  { key: 'feedback', label: 'ملاحظات', icon: IconChat, main: 'feedback', section: 'audit' },
+  { key: 'audit', label: 'التدقيق', icon: IconReport, main: 'audit', section: 'audit' },
   { key: 'settings', label: 'إعدادات النظام', icon: IconSettings, main: 'settings', sub: 'system', section: 'settings' },
 ];
-function activeTopKey(main: MainTab, sub: string): string {
-  if (main === 'contracts' && sub === 'tasks') return 'tasks';
-  if (main === 'contracts') return 'contracts';
-  if (main === 'whatsapp' && sub === 'designer') return 'designer';
-  if (main === 'whatsapp' && sub === 'templates') return 'templates';
-  if (main === 'whatsapp' && sub === 'contacts') return 'contacts';
-  if (main === 'whatsapp' && sub === 'media') return 'media';
-  if (main === 'whatsapp') return 'linking';
-  if (main === 'automation' && sub === 'designer') return 'designer';
-  if (main === 'automation') return 'automation';
-  if (main === 'settings') return 'settings';
+function activeTopKey(main: MainTab, _sub: string): string {
+  // Phone tabs are MAIN tabs only (dedupe fix): subsections are reached
+  // once, via the single subnav row below — never as extra phone tabs.
   return main;
 }
 
@@ -264,7 +247,7 @@ export default function App() {
     <header className="topbar">
       <div className="topbar-left">
         <span className="topbar-brand"><span className="brand-mark small"><IconShield /></span><b>Pilot System</b></span>
-        <span className="page-crumb">{nav.label}{subDef ? ` / ${subDef.label}` : ''}</span>
+        <span className="page-crumb">{nav.label}</span>
       </div>
       <div className="top-status">
         {data.killSwitch && <span className="pill danger">الأتمتة موقوفة</span>}

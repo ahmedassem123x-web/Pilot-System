@@ -91,6 +91,9 @@ const ROLE_DEFAULTS = {
 // BANNED_STEP_TYPES / AUTOMATION_* / UPLOAD_* now come from ./automation.js and ./media.js.
 const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
 const FILE_KINDS = ['original', 'buyer_signed', 'seller_signed', 'attachment'];
+const CONTRACT_TYPES = ['goods_sale', 'service', 'supply', 'general'];
+const CONTRACT_TYPE_AR = { goods_sale: 'بيع بضاعة', service: 'تقديم خدمة', supply: 'توريد', general: 'تنفيذ صفقة عام' };
+function contractTypeOf(c) { return CONTRACT_TYPES.includes(c.contract_type) ? c.contract_type : 'general'; }
 const TEMPLATE_STATUSES = ['pending', 'approved', 'rejected'];
 const CONVERSATION_STATUSES = ['new', 'open', 'pending', 'resolved', 'closed'];
 const TEMPLATE_LABELS_AR = {
@@ -1563,9 +1566,12 @@ const server = http.createServer(async (req, res) => {
       if (!can(user, 'contracts', 'create')) return forbidden();
       if (!body.buyer_phone || !body.seller_phone || !body.product_description || !body.amount) return send(res, 400, { error: 'buyer_phone, seller_phone, product_description and amount are required' }, p);
       const id = nextId();
-      const c = { id, code: contractCode(id), buyer_phone: body.buyer_phone, seller_phone: body.seller_phone, product_description: body.product_description, amount: Number(body.amount), currency: body.currency || 'SAR', delivery_point: body.delivery_point || null, state: 'draft', version: 1, clause_fingerprint: sha256(JSON.stringify(body) + id), created_at: new Date().toISOString() };
+      if (body.contract_type !== undefined && !CONTRACT_TYPES.includes(body.contract_type)) return send(res, 400, { error: 'contract_type must be one of: ' + CONTRACT_TYPES.join(', ') }, p);
+      const extra = {};
+      for (const k of ['quantity', 'specifications', 'service_duration', 'delivery_stages']) if (body[k] !== undefined && body[k] !== null && String(body[k]).trim() !== '') extra[k] = String(body[k]).trim();
+      const c = { id, code: contractCode(id), buyer_phone: body.buyer_phone, seller_phone: body.seller_phone, product_description: body.product_description, amount: Number(body.amount), currency: body.currency || 'SAR', delivery_point: body.delivery_point || null, contract_type: body.contract_type || 'general', ...extra, state: 'draft', version: 1, clause_fingerprint: sha256(JSON.stringify(body) + id), created_at: new Date().toISOString() };
       db.contracts.push(c);
-      db.contract_versions.push({ id: nextId(), contract_id: id, version: 1, snapshot: { buyer_phone: c.buyer_phone, seller_phone: c.seller_phone, product_description: c.product_description, amount: c.amount, currency: c.currency, delivery_point: c.delivery_point }, clause_fingerprint: c.clause_fingerprint, is_locked: false, created_at: c.created_at });
+      db.contract_versions.push({ id: nextId(), contract_id: id, version: 1, snapshot: { buyer_phone: c.buyer_phone, seller_phone: c.seller_phone, product_description: c.product_description, amount: c.amount, currency: c.currency, delivery_point: c.delivery_point, contract_type: c.contract_type }, clause_fingerprint: c.clause_fingerprint, is_locked: false, created_at: c.created_at });
       ['buyer', 'seller'].forEach((party) => db.conversations.push({ id: nextId(), contract_id: id, party, status: 'new', unread_count: 0, assigned_to: null }));
       db.tasks.push({ id: nextId(), contract_id: id, title: 'مراجعة العقد وإصداره', type: 'review', status: 'open', assigned_to: null, created_at: new Date().toISOString() });
       audit(actor, 'contract', id, 'created', { code: c.code }); return send(res, 201, c, p);
@@ -1606,6 +1612,13 @@ const server = http.createServer(async (req, res) => {
       if (!auditLines.length) lines.push({ text: 'لا أحداث تدقيق لهذا العقد بعد.', size: 12 });
       else for (const a of auditLines) lines.push({ text: `${String(a.created_at).slice(0, 10)} ${String(a.created_at).slice(11, 16)} — ${a.actor}: ${a.action}${a.details && a.details.to ? ' ← ' + (STATE_AR[String(a.details.to)] || String(a.details.to)) : ''}${a.details && a.details.financial_reference ? ' (مرجع: ' + String(a.details.financial_reference) + ')' : ''}`, size: 11 });
       lines.push({ text: 'هذا المستند عرض لسجل العقد المقفل في النظام، وليس بديلاً قابلاً للتعديل عنه. أي تنفيذ مالي يتم يدوياً خارج النظام عبر المؤسسة المالية الخارجية.', size: 11, blankAfter: false });
+      lines[0] = { text: `عقد ${CONTRACT_TYPE_AR[contractTypeOf(c)]} — Pilot System`, size: 20, align: 'center', blankAfter: true };
+      const typeLines = [];
+      if (contractTypeOf(c) === 'goods_sale') { if (c.quantity) typeLines.push({ text: `الكمية: ${c.quantity}`, size: 14 }); if (c.specifications) typeLines.push({ text: `المواصفات: ${c.specifications}`, size: 14 }); }
+      if (contractTypeOf(c) === 'service') { if (c.service_duration) typeLines.push({ text: `مدة الخدمة: ${c.service_duration}`, size: 14 }); }
+      if (contractTypeOf(c) === 'supply') { if (c.delivery_stages) typeLines.push({ text: `مراحل/دفعات التوريد: ${c.delivery_stages}`, size: 14 }); }
+      const dpIdx = lines.findIndex((l) => String(l.text || '').startsWith('نقطة التسليم'));
+      if (typeLines.length && dpIdx >= 0) lines.splice(dpIdx + 1, 0, ...typeLines);
       let pdf;
       try { pdf = buildPdf(lines); } catch (e) { return send(res, 500, { error: 'pdf generation failed: ' + e.message }, p); }
       res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="contract-${c.code}.pdf"`, ...securityHeaders(p) });
@@ -1619,7 +1632,7 @@ const server = http.createServer(async (req, res) => {
       const existing = db.contracts.find((x) => x.is_demo);
       if (existing) return send(res, 200, { ok: true, already: true, contract: existing }, p);
       const id = nextId();
-      const c = { id, code: contractCode(id), buyer_phone: '+967700000001', seller_phone: '+967700000002', product_description: 'تجريبي — منتج تجريبي للعرض فقط', amount: 100, currency: 'SAR', delivery_point: 'تجريبي — نقطة عرض فقط', state: 'draft', version: 1, is_demo: true, clause_fingerprint: sha256('demo-contract' + id), created_at: new Date().toISOString() };
+      const c = { id, code: contractCode(id), buyer_phone: '+967700000001', seller_phone: '+967700000002', product_description: 'تجريبي — منتج تجريبي للعرض فقط', amount: 100, currency: 'SAR', delivery_point: 'تجريبي — نقطة عرض فقط', state: 'draft', version: 1, is_demo: true, contract_type: 'general', clause_fingerprint: sha256('demo-contract' + id), created_at: new Date().toISOString() };
       db.contracts.push(c);
       db.contract_versions.push({ id: nextId(), contract_id: id, version: 1, snapshot: { buyer_phone: c.buyer_phone, seller_phone: c.seller_phone, product_description: c.product_description, amount: c.amount, currency: c.currency, delivery_point: c.delivery_point }, clause_fingerprint: c.clause_fingerprint, is_locked: false, created_at: c.created_at });
       ['buyer', 'seller'].forEach((party) => db.conversations.push({ id: nextId(), contract_id: id, party, status: 'new', unread_count: 0, assigned_to: null }));
@@ -1660,7 +1673,7 @@ const server = http.createServer(async (req, res) => {
       if (!can(user, 'contracts', 'edit')) return forbidden();
       const c = db.contracts.find((x) => x.id === Number(contractAmendMatch[1]));
       if (!c) return send(res, 404, { error: 'contract not found' }, p);
-      const amendable = ['buyer_phone', 'seller_phone', 'product_description', 'amount', 'currency', 'delivery_point'];
+      const amendable = ['buyer_phone', 'seller_phone', 'product_description', 'amount', 'currency', 'delivery_point', 'quantity', 'specifications', 'service_duration', 'delivery_stages'];
       const changes = {};
       for (const k of amendable) if (body[k] !== undefined) changes[k] = (k === 'amount' ? Number(body[k]) : body[k]);
       if (!Object.keys(changes).length) return send(res, 400, { error: 'amend requires at least one field: ' + amendable.join(', ') }, p);
@@ -1697,6 +1710,26 @@ const server = http.createServer(async (req, res) => {
         const f = { id: nextId(), contract_id: c.id, filename: body.filename, kind: body.kind, mime_type: body.mime_type || null, size_bytes: (typeof body.size_bytes === 'number' ? body.size_bytes : null), uploaded_by: actor, created_at: new Date().toISOString() };
         db.contract_files.push(f); audit(actor, 'contract_file', f.id, 'uploaded', { contract_id: c.id, kind: f.kind, filename: f.filename }); return send(res, 201, f, p);
       }
+    }
+    const signingMatch = p.match(/^\/api\/contracts\/(\d+)\/signing$/);
+    if (signingMatch && req.method === 'GET') {
+      if (!can(user, 'contracts', 'view')) return forbidden();
+      const c = db.contracts.find((x) => x.id === Number(signingMatch[1]));
+      if (!c) return send(res, 404, { error: 'contract not found' }, p);
+      const files = db.contract_files.filter((f) => f.contract_id === c.id);
+      const buyer = files.some((f) => f.kind === 'buyer_signed');
+      const seller = files.some((f) => f.kind === 'seller_signed');
+      return send(res, 200, { contract_id: c.id, code: c.code, contract_type: contractTypeOf(c), pdf_sent_at: c.pdf_sent_at || null, pdf_sent_by: c.pdf_sent_by || null, buyer_signed: buyer, seller_signed: seller, both_signed: buyer && seller, files }, p);
+    }
+    const sendPdfMatch = p.match(/^\/api\/contracts\/(\d+)\/send-pdf$/);
+    if (sendPdfMatch && req.method === 'POST') {
+      if (!can(user, 'contracts', 'edit')) return forbidden();
+      const c = db.contracts.find((x) => x.id === Number(sendPdfMatch[1]));
+      if (!c) return send(res, 404, { error: 'contract not found' }, p);
+      if (c.pdf_sent_at) return send(res, 200, { ok: true, already: true, contract: c }, p);
+      c.pdf_sent_at = new Date().toISOString(); c.pdf_sent_by = actor;
+      audit(actor, 'contract', c.id, 'pdf_sent', { code: c.code, contract_type: contractTypeOf(c) }); save();
+      return send(res, 200, { ok: true, already: false, contract: c }, p);
     }
     const contractSingleMatch = p.match(/^\/api\/contracts\/(\d+)$/);
     if (contractSingleMatch && req.method === 'GET') {

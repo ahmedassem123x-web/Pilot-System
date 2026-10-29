@@ -419,3 +419,21 @@ main.main-inbox{padding:0}
   .flow-canvas-wrap{grid-template-columns:1fr}
   .flow-props{position:static}
 }
+
+/* Continuation round: dedupe + composer + no page overflow (390px) */
+main { overflow-x: hidden; }
+.card { overflow-x: auto; }
+.table-wrap { overflow-x: auto; max-width: 100%; }
+.wa-composer-bar { display: flex; align-items: center; gap: 6px; background: #fff; border: 1px solid #dbe3ea; border-radius: 999px; padding: 4px 6px; margin: 8px 0; }
+.wa-composer-input { flex: 1; min-width: 0; border: 0; outline: none; font-size: 15px; padding: 8px 4px; background: transparent; }
+.wa-attach-btn { width: 40px; height: 40px; min-width: 40px; border: 0; background: transparent; border-radius: 50%; font-size: 19px; cursor: pointer; line-height: 1; }
+.wa-attach-btn:hover { background: #eef2f5; }
+.wa-attach-btn.active { background: #d1f4ee; }
+.wa-send-btn { width: 44px; height: 44px; min-width: 44px; border: 0; border-radius: 50%; background: #0f3d3a; color: #fff; font-size: 20px; cursor: pointer; }
+.wa-send-btn:disabled { opacity: .5; cursor: default; }
+.wa-hidden-file { display: none; }
+.inline-select, .inline-input { font-size: 14px; padding: 8px; border: 1px solid #dbe3ea; border-radius: 10px; background: #fff; max-width: 100%; }
+@media (max-width: 520px) {
+  .wa-composer-bar { border-radius: 18px; flex-wrap: wrap; }
+  .wa-composer-input { flex-basis: 100%; order: 9; }
+}
