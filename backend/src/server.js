@@ -24,6 +24,14 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { hashPassword, verifyPassword, signToken, verifyToken, loginBlocked, recordLoginFailure, clearLoginFailures } = require('./auth');
+const { appendAudit } = require('./audit');
+const { STATES, TRANSITIONS, sha256, contractCode } = require('./contracts');
+const { normPhone, phoneKey, within24h, META_STATUS_RANK, mapMetaStatus, mapMetaTemplateStatus } = require('./whatsapp');
+const { BANNED_STEP_TYPES, AUTOMATION_MAX_STEPS_PER_RUN, AUTOMATION_COOLDOWN_MS, AUTOMATION_MAX_RUNS_PER_MINUTE, stepIsBanned, hasBannedStep, normaliseSteps, normalizeArabic, keywordMatchKind, parseHoursRange, isBusinessHoursNow } = require('./automation');
+const { validContactPhone, parseContactLabels, parseCsv, csvEscape } = require('./contacts');
+const { UPLOAD_MAX_BYTES, UPLOAD_ALLOWED, sanitizeFilename, publicUpload } = require('./media');
+const { metaConfig, embeddedLaunchParams, metaErrorInfo, safeEqualStr, metaRequest } = require('./meta');
 
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'data.json');
@@ -32,19 +40,7 @@ const FRONTEND_FALLBACK = path.join(__dirname, '..', '..', 'frontend');
 const MAX_BODY_BYTES = 1024 * 1024; // 1 MB (all routes except the webhook)
 const WEBHOOK_MAX_BODY_BYTES = 5 * 1024 * 1024; // 5 MB: Meta webhook only
 
-const STATES = ['draft','issued','accepted','payment_pending','payment_confirmed','preparing','delivered','completed','disputed','refund_pending','refunded','cancelled'];
-const TRANSITIONS = {
-  draft: ['issued','cancelled'],
-  issued: ['accepted','cancelled'],
-  accepted: ['payment_pending','cancelled'],
-  payment_pending: ['payment_confirmed','cancelled'],
-  payment_confirmed: ['preparing','cancelled'],
-  preparing: ['delivered','disputed'],
-  delivered: ['completed','disputed'],
-  disputed: ['refund_pending','cancelled','preparing'],
-  refund_pending: ['refunded'],
-  completed: [], refunded: [], cancelled: [],
-};
+// STATES/TRANSITIONS/sha256/contractCode now come from ./contracts.js (single source of truth).
 const ROLES = ['owner','ops_supervisor','ops_employee','financial_coordinator','viewer'];
 const DEPARTMENTS = ['Operations','Finance Coordination','Customer Support','Administration'];
 const DEPARTMENT_AR = {
@@ -91,31 +87,8 @@ const ROLE_DEFAULTS = {
     },
   },
 };
-const BANNED_STEP_TYPES = ['release_money', 'refund_money', 'confirm_payment', 'settle_dispute', 'release_payment', 'refund_payment', 'payment_confirm', 'release_funds', 'refund_funds'];
-// Stage B: automation execution limits + file-upload caps. The 16 MB cap is
-// deliberately BELOW Meta's 100 MB document limit: the free container has
-// limited disk/timeout headroom, and a 16 MB file is ample for contract
-// photos/documents sent on WhatsApp. See docs/zeromsg-adaptation.md.
-const AUTOMATION_MAX_STEPS_PER_RUN = 20;
-const AUTOMATION_COOLDOWN_MS = 60 * 1000;
-const AUTOMATION_MAX_RUNS_PER_MINUTE = 5;
-const UPLOAD_MAX_BYTES = 16 * 1024 * 1024; // 16 MiB, all types
+// BANNED_STEP_TYPES / AUTOMATION_* / UPLOAD_* now come from ./automation.js and ./media.js.
 const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
-const UPLOAD_ALLOWED = {
-  '.jpg': { mime: 'image/jpeg', kind: 'image' }, '.jpeg': { mime: 'image/jpeg', kind: 'image' },
-  '.png': { mime: 'image/png', kind: 'image' },
-  '.mp4': { mime: 'video/mp4', kind: 'video' }, '.3gp': { mime: 'video/3gpp', kind: 'video' },
-  '.aac': { mime: 'audio/aac', kind: 'audio' }, '.amr': { mime: 'audio/amr', kind: 'audio' },
-  '.mp3': { mime: 'audio/mpeg', kind: 'audio' }, '.ogg': { mime: 'audio/ogg', kind: 'audio' },
-  '.opus': { mime: 'audio/opus', kind: 'audio' },
-  '.pdf': { mime: 'application/pdf', kind: 'document' }, '.doc': { mime: 'application/msword', kind: 'document' },
-  '.docx': { mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', kind: 'document' },
-  '.xls': { mime: 'application/vnd.ms-excel', kind: 'document' },
-  '.xlsx': { mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', kind: 'document' },
-  '.ppt': { mime: 'application/vnd.ms-powerpoint', kind: 'document' },
-  '.pptx': { mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', kind: 'document' },
-  '.txt': { mime: 'text/plain', kind: 'document' },
-};
 const FILE_KINDS = ['original', 'buyer_signed', 'seller_signed', 'attachment'];
 const TEMPLATE_STATUSES = ['pending', 'approved', 'rejected'];
 const CONVERSATION_STATUSES = ['new', 'open', 'pending', 'resolved', 'closed'];
@@ -131,84 +104,12 @@ const TEMPLATE_LABELS_AR = {
   dispute_opened: 'فتح نزاع',
   handover_support: 'تسليم للدعم',
 };
-const CHECKLIST_STEPS = [
-  { step: 1, key: 'meta_business', title_ar: 'حساب Meta Business', description_ar: 'التحقق من حساب Meta Business الحالي قبل إنشاء أي حساب جديد' },
-  { step: 2, key: 'dedicated_number', title_ar: 'رقم مخصص للخدمة', description_ar: 'رقم واتساب مخصص لخدمة الوساطة، منفصل عن الرقم الشخصي' },
-  { step: 3, key: 'fi_agreement', title_ar: 'اتفاقية المؤسسة المالية', description_ar: 'اتفاقية مع مؤسسة مالية خارجية لحفظ الأموال والتنسيق اليدوي فقط' },
-  { step: 4, key: 'templates_approval', title_ar: 'اعتماد القوالب', description_ar: 'اعتماد قوالب واتساب العشرة لدى Meta قبل الإرسال' },
-  { step: 5, key: 'env_vars', title_ar: 'متغيرات البيئة', description_ar: 'إعداد متغيرات البيئة عبر القناة الآمنة، دون وضع أسرار في الملفات' },
-  { step: 6, key: 'webhook_hmac', title_ar: 'تحقق Webhook وHMAC', description_ar: 'إعداد رمز التحقق وسر التطبيق والتحقق من توقيع Webhook' },
-  { step: 7, key: 'test_message', title_ar: 'رسالة اختبار', description_ar: 'إرسال رسالة اختبار عبر واتساب والتأكد من وصولها' },
-  { step: 8, key: 'full_cycle_test', title_ar: 'اختبار دورة كاملة', description_ar: 'اختبار دورة عقد كاملة من الإنشاء حتى الإغلاق' },
-  { step: 9, key: 'backup_monitoring', title_ar: 'النسخ الاحتياطي والمراقبة', description_ar: 'نسخ احتياطي ومراقبة للسجلات والأعطال' },
-  { step: 10, key: 'client_acceptance', title_ar: 'قبول العميل', description_ar: 'قبول العميل النهائي قبل التشغيل الفعلي' },
-];
+// Old 10-step CHECKLIST_STEPS deleted: the one wizard is computeWizardSteps() (7 steps).
 
-// ---- Token signing secret: env, or a random per-process fallback. ----
-// Never a hardcoded default: with no JWT_SECRET, tokens simply do not
-// survive a restart, and a warning is logged (no secret value is logged).
-let JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) {
-  JWT_SECRET = crypto.randomBytes(32).toString('hex');
-  console.warn('WARNING: JWT_SECRET is not set — using a random per-process secret. Tokens will not survive a restart. Set JWT_SECRET in production.');
-}
 
-// ---- Password hashing (scrypt, per-user salt) ----
-function hashPassword(password) {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
-  return `scrypt:${salt}:${hash}`;
-}
-function verifyPassword(password, stored) {
-  try {
-    const parts = String(stored || '').split(':');
-    if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
-    const hash = crypto.scryptSync(password, parts[1], 64).toString('hex');
-    return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(parts[2], 'hex'));
-  } catch { return false; }
-}
-
-// ---- Minimal HMAC token (header.payload.signature, 8h expiry) ----
-function b64url(buf) { return Buffer.from(buf).toString('base64url'); }
-function signToken(user) {
-  const header = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-  const payload = b64url(JSON.stringify({
-    sub: user.id, email: user.email, role: user.role,
-    iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 8 * 3600,
-  }));
-  const sig = crypto.createHmac('sha256', JWT_SECRET).update(`${header}.${payload}`).digest('base64url');
-  return `${header}.${payload}.${sig}`;
-}
-function verifyToken(token) {
-  try {
-    const [header, payload, sig] = String(token).split('.');
-    if (!header || !payload || !sig) return null;
-    const expected = crypto.createHmac('sha256', JWT_SECRET).update(`${header}.${payload}`).digest('base64url');
-    if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
-    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    if (!data.exp || data.exp * 1000 < Date.now()) return null;
-    return data;
-  } catch { return null; }
-}
-
+// Auth (hashing, HMAC tokens) now comes from ./auth.js; JWT_SECRET lives there.
 // ---- Login rate limiting: max 10 failed attempts per IP per 15 min ----
-const LOGIN_WINDOW_MS = 15 * 60 * 1000;
-const LOGIN_MAX_FAILED = 10;
-const loginFailures = new Map(); // ip -> { count, resetAt }
-function loginBlocked(ip) {
-  const rec = loginFailures.get(ip);
-  if (!rec) return false;
-  if (Date.now() > rec.resetAt) { loginFailures.delete(ip); return false; }
-  return rec.count >= LOGIN_MAX_FAILED;
-}
-function recordLoginFailure(ip) {
-  const now = Date.now();
-  const rec = loginFailures.get(ip);
-  if (!rec || now > rec.resetAt) loginFailures.set(ip, { count: 1, resetAt: now + LOGIN_WINDOW_MS });
-  else rec.count += 1;
-}
-function clearLoginFailures(ip) { loginFailures.delete(ip); }
-
+// Login rate limiting now comes from ./auth.js.
 // ---- Data store ----
 function load() {
   try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
@@ -216,18 +117,14 @@ function load() {
 }
 let db = load();
 // Migrate older data files: never drop existing rows, just add new collections.
-for (const k of ['users', 'contracts', 'conversations', 'messages', 'tasks', 'workflows', 'templates', 'rules', 'audit', 'contract_versions', 'contract_files', 'automation_logs', 'uploads', 'contacts']) {
+for (const k of ['users', 'contracts', 'conversations', 'messages', 'tasks', 'workflows', 'templates', 'rules', 'audit', 'contract_versions', 'contract_files', 'automation_logs', 'uploads', 'contacts', 'quick_replies']) {
   if (!Array.isArray(db[k])) db[k] = [];
 }
 if (typeof db.killSwitch !== 'boolean') db.killSwitch = false;
 if (typeof db.seq !== 'number') db.seq = 1;
 function save() { fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2)); }
 function nextId() { return db.seq++; }
-function audit(actor, entity, id, action, details = {}) {
-  db.audit.push({ id: nextId(), actor, entity, entity_id: id, action, details, created_at: new Date().toISOString() });
-  save();
-}
-function sha256(s) { return crypto.createHash('sha256').update(s).digest('hex'); }
+function audit(actor, entity, id, action, details = {}) { appendAudit(db, nextId, save, actor, entity, id, action, details); }
 
 // ---- Security headers (CSP keeps 'unsafe-inline' only because the
 // frontend is a single inlined HTML file; frame-ancestors blocks framing) ----
@@ -276,92 +173,11 @@ function readRawBody(req, maxBytes) {
     req.on('error', () => resolve({ raw: Buffer.concat(chunks), tooLarge: true }));
   });
 }
-// Constant-time signature comparison (same-length buffers only; a
-// length mismatch is itself a rejection, and lengths here are fixed).
-function safeEqualStr(a, b) {
-  const ba = Buffer.from(String(a)), bb = Buffer.from(String(b));
-  if (ba.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ba, bb);
-}
-
-// ---- Meta WhatsApp Cloud API client (built-ins only) ----
-// Env names only; values are never logged, returned, or persisted.
-function metaConfig() {
-  const mock = process.env.META_MOCK_BASE_URL || '';
-  const version = process.env.WHATSAPP_API_VERSION || 'v26.0';
-  const token = process.env.WHATSAPP_ACCESS_TOKEN || '';
-  const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID || '';
-  const wabaId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || '';
-  // Embedded Signup identifiers only: App ID / Config ID are public
-  // launch parameters, NOT secrets. The App Secret is never returned.
-  const appId = process.env.WHATSAPP_APP_ID || '';
-  const configId = process.env.WHATSAPP_CONFIG_ID || '';
-  const appSecret = process.env.WHATSAPP_APP_SECRET || '';
-  return {
-    base: (mock || 'https://graph.facebook.com').replace(/\/+$/, ''),
-    version, token, phoneId, wabaId, mock: !!mock,
-    configured: !!(token && phoneId && wabaId),
-    appId, configId,
-    embeddedConfigured: !!(appId && configId && appSecret),
-    embedded: {
-      app_id_configured: !!appId, config_id_configured: !!configId,
-      app_secret_configured: !!appSecret,
-    },
-  };
-}
-// Embedded Signup launch URL components (no secret in any of them).
-// The frontend builds the final URL from these + its own origin as
-// redirect_uri; redirect_uri must be whitelisted in the Meta App
-// (Valid OAuth Redirect URIs) or Meta rejects the launch.
-function embeddedLaunchParams(cfg) {
-  return {
-    dialog_base: 'https://www.facebook.com',
-    dialog_path: '/' + cfg.version + '/dialog/oauth',
-    client_id: cfg.appId, config_id: cfg.configId,
-    response_type: 'code', override_default_response_type: true,
-    scope: 'whatsapp_business_management,whatsapp_business_messaging',
-  };
-}
-// Sanitised Meta error: code + message only, capped, never a token.
-function metaErrorInfo(parsed) {
-  const err = parsed && parsed.error;
-  if (err && typeof err === 'object') {
-    return { meta_error_code: err.code !== undefined ? err.code : null, error: String(err.message || 'meta request failed').slice(0, 500) };
-  }
-  return { error: 'meta request failed' };
-}
-function metaRequest(method, path, bodyObj, tokenOverride) {
-  const cfg = metaConfig();
-  const token = tokenOverride !== undefined ? tokenOverride : cfg.token;
-  return new Promise((resolve) => {
-    let url;
-    try { url = new URL(`${cfg.base}/${cfg.version}${path}`); }
-    catch { return resolve({ ok: false, ...metaErrorInfo(null) }); }
-    const lib = url.protocol === 'http:' ? require('http') : require('https');
-    const payload = bodyObj ? JSON.stringify(bodyObj) : null;
-    const headers = { 'Content-Type': 'application/json' };
-    if (token) headers.Authorization = 'Bearer ' + token;
-    const req = lib.request(url, { method, headers, timeout: 10000 }, (resp) => {
-      let data = '';
-      resp.on('data', (c) => { data += c; });
-      resp.on('end', () => {
-        let parsed = null;
-        try { parsed = data ? JSON.parse(data) : null; } catch {}
-        if (resp.statusCode >= 200 && resp.statusCode < 300) resolve({ ok: true, status: resp.statusCode, data: parsed });
-        else resolve({ ok: false, status: resp.statusCode, ...metaErrorInfo(parsed) });
-      });
-    });
-    req.on('timeout', () => { req.destroy(); resolve({ ok: false, error: 'meta request timed out' }); });
-    req.on('error', () => resolve({ ok: false, error: 'meta request failed' }));
-    if (payload) req.write(payload);
-    req.end();
-  });
-}
-
+// safeEqualStr now comes from ./meta.js (constant-time, same-length only).
+// Meta client (metaConfig/metaRequest/embeddedLaunchParams) now comes from ./meta.js.
 // ---- WhatsApp phone / conversation helpers ----
 // Normalise for matching: strip spaces, dashes, parentheses; keep '+'.
-function normPhone(p) { return String(p || '').replace(/[\s\-()]/g, ''); }
-function phoneKey(p) { return normPhone(p).replace(/^\+/, ''); }
+// normPhone/phoneKey now come from ./whatsapp.js.
 // Find (or, for sending, create) the conversation for a customer phone:
 // prefer a contract conversation whose buyer/seller phone matches, else
 // a GENERAL conversation (contract_id null, party 'general') for that
@@ -399,62 +215,9 @@ function lastInboundAtForPhone(phone) {
   }
   return latest;
 }
-function within24h(iso) {
-  if (!iso) return false;
-  const t = Date.parse(iso);
-  return Number.isFinite(t) && (Date.now() - t) < 24 * 3600 * 1000;
-}
-// Status ranking: never let an older status overwrite a newer one,
-// except 'failed', which always applies.
-const META_STATUS_RANK = { sent: 1, delivered: 2, read: 3, failed: 4 };
-function mapMetaStatus(s) {
-  const v = String(s || '').toLowerCase();
-  if (['sent', 'delivered', 'read', 'failed'].includes(v)) return v;
-  return null;
-}
-function mapMetaTemplateStatus(s) {
-  const v = String(s || '').toUpperCase();
-  if (v === 'APPROVED') return 'approved';
-  if (v === 'PENDING') return 'pending';
-  if (v === 'REJECTED') return 'rejected';
-  if (v === 'PAUSED') return 'paused';
-  if (v === 'DISABLED') return 'disabled';
-  return null;
-}
-function contractCode(n) { return 'PS-' + String(1000 + n); }
-function stepIsBanned(s) {
-  if (typeof s === 'string') return BANNED_STEP_TYPES.includes(s);
-  if (!s || typeof s !== 'object') return false;
-  const t = s.step_type || s.action || s.type || '';
-  if (BANNED_STEP_TYPES.includes(t)) return true;
-  // A contract-state step that moves money state is banned even if it
-  // does not use a banned name: payment confirmation / refund states
-  // are human-only, always, with an FI reference.
-  if ((t === 'contract_transition' || t === 'state_change' || t === 'update_contract_state') &&
-      ['payment_confirmed', 'refund_pending', 'refunded'].includes(String(s.to || s.target_state || ''))) return true;
-  return false;
-}
-function hasBannedStep(steps) {
-  // Recursive: condition branches (then/else/steps/branches) are checked
-  // too, at save time AND again at execution time.
-  const walk = (arr) => {
-    for (const s of (arr || [])) {
-      if (stepIsBanned(s)) return true;
-      if (s && typeof s === 'object') {
-        for (const k of ['then', 'else', 'steps', 'branches', 'children']) {
-          if (Array.isArray(s[k]) && walk(s[k])) return true;
-        }
-      }
-    }
-    return false;
-  };
-  return walk(steps);
-}
-// Normalise steps: assign/keep an explicit `order` field, then sort by it.
-function normaliseSteps(steps) {
-  return (steps || []).map((s, i) => ({ ...s, order: (typeof s.order === 'number' ? s.order : i) }))
-    .sort((a, b) => a.order - b.order);
-}
+// within24h / META_STATUS_RANK / mapMetaStatus / mapMetaTemplateStatus now come from ./whatsapp.js;
+// contractCode from ./contracts.js.
+// stepIsBanned/hasBannedStep/normaliseSteps now come from ./automation.js.
 function bumpUnread(conversationId) {
   const conv = db.conversations.find((c) => c.id === conversationId);
   if (conv) conv.unread_count = (conv.unread_count || 0) + 1;
@@ -483,7 +246,7 @@ function contractVersions(contractId) {
 //   confers eligibility, and creating a contact never confers it either.
 //   Eligibility is a record of a past interaction, not consent: staff must
 //   still respect Meta's 24h window / approved-template rules on every send.
-function validContactPhone(p) { return /^\+?\d{7,15}$/.test(normPhone(p)); }
+// validContactPhone now comes from ./contacts.js.
 function contactMatchesConversation(contact, conv) {
   const key = phoneKey(contact.phone);
   if (conv.contract_id !== null && conv.contract_id !== undefined) {
@@ -520,39 +283,7 @@ function contactLinks(contact) {
   };
 }
 function contactPublic(contact) { return { ...contact, ...contactLinks(contact) }; }
-function parseContactLabels(v) {
-  const raw = Array.isArray(v) ? v : (typeof v === 'string' ? v.split(',') : []);
-  const out = [];
-  for (const x of raw) {
-    const t = String(x || '').trim().slice(0, 50);
-    if (t && !out.includes(t)) out.push(t);
-  }
-  return out.slice(0, 20);
-}
-// Minimal CSV parser: quoted fields, "" escapes, commas, CRLF/LF. Returns
-// rows of cell strings; fully-empty rows are dropped by the caller.
-function parseCsv(text) {
-  const rows = []; let row = []; let cell = ''; let inQuotes = false;
-  const src = String(text || '').replace(/^\ufeff/, '');
-  for (let i = 0; i < src.length; i++) {
-    const ch = src[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (src[i + 1] === '"') { cell += '"'; i++; } else inQuotes = false;
-      } else cell += ch;
-    } else if (ch === '"') inQuotes = true;
-    else if (ch === ',') { row.push(cell); cell = ''; }
-    else if (ch === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
-    else if (ch !== '\r') cell += ch;
-  }
-  row.push(cell); rows.push(row);
-  return rows.filter((r) => r.some((c) => String(c).trim() !== ''));
-}
-function csvEscape(v) {
-  const s = String(v === null || v === undefined ? '' : v);
-  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-}
-
+// parseContactLabels/parseCsv/csvEscape now come from ./contacts.js.
 // ---- Permissions ----
 function effectiveSections(user) {
   if (Array.isArray(user.sections)) return user.sections.filter((s) => SECTIONS.includes(s));
@@ -665,13 +396,7 @@ function templatePublic(t, metaConfigured) {
 // Arabic normalisation for keyword matching: strip diacritics/tatweel,
 // unify alef forms, ة/ى variants, collapse whitespace. Applied to BOTH the
 // inbound text and the trigger value, so "عَقْد جديد" matches "عقد جديد".
-function normalizeArabic(s) {
-  return String(s || '').toLowerCase()
-    .replace(/[\u064B-\u0652\u0670]/g, '')
-    .replace(/\u0640/g, '')
-    .replace(/[أإآ]/g, 'ا').replace(/ؤ/g, 'و').replace(/ئ/g, 'ي').replace(/ى/g, 'ي').replace(/ة/g, 'ه')
-    .replace(/\s+/g, ' ').trim();
-}
+// normalizeArabic now comes from ./automation.js.
 function phoneForConversation(conv) {
   if (!conv) return null;
   if (conv.contract_id !== null && conv.contract_id !== undefined) {
@@ -696,24 +421,9 @@ function automationLog(conv, workflow, outcome, details = {}) {
 }
 // Business-hours check. trigger_value may be "HH:MM-HH:MM" (server local
 // time); default 09:00-17:00. Handles overnight ranges (start > end).
-function parseHoursRange(v) {
-  const m = String(v || '').match(/^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/);
-  if (!m) return { start: 9 * 60, end: 17 * 60 };
-  return { start: Number(m[1]) * 60 + Number(m[2]), end: Number(m[3]) * 60 + Number(m[4]) };
-}
-function isBusinessHoursNow(v) {
-  const { start, end } = parseHoursRange(v);
-  const now = new Date(); const mins = now.getHours() * 60 + now.getMinutes();
-  return start <= end ? (mins >= start && mins < end) : (mins >= start || mins < end);
-}
+// parseHoursRange/isBusinessHoursNow now come from ./automation.js.
 function triggerKey(w) { return (w._kind || 'workflow') + ':' + w.id; }
-function keywordMatchKind(triggerValue, normInbound) {
-  const tv = normalizeArabic(triggerValue);
-  if (!tv || !normInbound) return null;
-  if (normInbound === tv) return 'exact';
-  if (normInbound.includes(tv)) return 'contains';
-  return null;
-}
+// keywordMatchKind now comes from ./automation.js.
 // --- Automation send (single place for the Stage A send gate) ---
 // Returns {sent, dry_run, blocked_reason}. NEVER claims sent on dry-run.
 async function automationSend(conv, spec) {
@@ -1043,17 +753,7 @@ async function runContractEventAutomation(contract, newState) {
   return results;
 }
 // --- File upload helpers (Node built-ins only) ---
-function sanitizeFilename(name) {
-  let base = String(name || '').split(/[\\/]/).pop() || 'file';
-  base = base.replace(/[^A-Za-z0-9._-]/g, '_').replace(/\.+/g, '.').replace(/^[^A-Za-z0-9]+/, '');
-  if (!base || base === '.' || base === '..') base = 'file';
-  const dot = base.lastIndexOf('.');
-  if (dot > 0) {
-    const ext = base.slice(dot); const stem = base.slice(0, dot).slice(0, 80);
-    base = (stem || 'file') + ext;
-  } else base = base.slice(0, 100);
-  return base;
-}
+// sanitizeFilename now comes from ./media.js.
 function parseMultipart(buffer, boundary) {
   const fields = {}; const files = [];
   const sep = Buffer.from('--' + boundary);
@@ -1113,11 +813,7 @@ function metaUploadMedia(buffer, filename, mime) {
     rq.write(bodyBuf); rq.end();
   });
 }
-function publicUpload(u) {
-  if (!u) return null;
-  return { id: u.id, filename: u.sanitized_filename, stored_filename: u.stored_filename, mime_type: u.mime_type, kind: u.kind, size_bytes: u.size_bytes, media_id: u.media_id || null, conversation_id: u.conversation_id || null, uploaded_by: u.uploaded_by, dry_run: !!u.dry_run, created_at: u.created_at };
-}
-// Stage B upload handler (raw multipart body; called before JSON parsing).
+// publicUpload now comes from ./media.js.
 async function handleWhatsAppUpload(req, res, p, user, actor) {
   const forbidden = () => send(res, 403, { error: 'forbidden — لا صلاحية لديك لعرض هذا القسم' }, p);
   if (!can(user, 'whatsapp', 'edit')) return forbidden();
@@ -1242,6 +938,45 @@ function seedPrimaryAdmin() {
 seedPrimaryAdmin();
 
 const GENERIC_LOGIN_ERROR = 'invalid email or password';
+
+// Single source of truth for the 7-step linking wizard: server-computed
+// booleans only, no secret values. Used by /api/whatsapp/status AND
+// /api/whatsapp/linking (the one wizard); the old 10-step checklist
+// endpoint now only redirects to this one.
+function computeWizardSteps() {
+  const cfg = metaConfig();
+  const verify = !!process.env.WHATSAPP_VERIFY_TOKEN;
+  const hmac = !!process.env.WHATSAPP_APP_SECRET;
+  const metaConfigured = cfg.configured;
+  return [
+    { key: 'meta_business', title_ar: 'حساب Meta Business', status: cfg.wabaId ? 'done' : 'pending' },
+    { key: 'dedicated_number', title_ar: 'رقم مخصص للخدمة', status: cfg.phoneId ? 'done' : 'pending' },
+    { key: 'env_vars', title_ar: 'متغيرات البيئة', status: (verify && hmac && metaConfigured) ? 'done' : 'pending' },
+    { key: 'webhook', title_ar: 'تحقق Webhook', status: (verify && hmac) ? 'done' : 'pending' },
+    { key: 'meta_connection', title_ar: 'اختبار اتصال Meta', status: metaConfigured ? 'pending' : 'blocked' },
+    { key: 'templates', title_ar: 'اعتماد القوالب لدى Meta', status: db.templates.some((t) => t.meta_status === 'approved') ? 'done' : (metaConfigured ? 'pending' : 'blocked') },
+    { key: 'test_message', title_ar: 'رسالة اختبار', status: metaConfigured ? 'pending' : 'blocked' },
+  ];
+}
+function linkingPayload() {
+  const cfg = metaConfig();
+  const steps = computeWizardSteps();
+  return {
+    steps,
+    done: steps.filter((x) => x.status === 'done').length,
+    blocked: steps.filter((x) => x.status === 'blocked').length,
+    configured: cfg.configured,
+    webhook_verify_configured: !!process.env.WHATSAPP_VERIFY_TOKEN,
+    webhook_hmac_configured: !!process.env.WHATSAPP_APP_SECRET,
+    whatsapp_access_configured: !!cfg.token,
+    phone_number_configured: !!cfg.phoneId,
+    waba_configured: !!cfg.wabaId,
+    api_version: cfg.version,
+    app_base_url: process.env.APP_BASE_URL || null,
+    webhook_url: (process.env.APP_BASE_URL ? String(process.env.APP_BASE_URL).replace(/\/$/, '') : null) ? String(process.env.APP_BASE_URL).replace(/\/$/, '') + '/api/whatsapp/webhook' : null,
+    embedded_signup: { configured: cfg.embeddedConfigured, app_id_configured: cfg.embedded.app_id_configured, config_id_configured: cfg.embedded.config_id_configured, app_secret_configured: cfg.embedded.app_secret_configured },
+  };
+}
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
@@ -1447,15 +1182,7 @@ const server = http.createServer(async (req, res) => {
       const metaConfigured = cfg.configured;
       // Wizard steps: server-computed, booleans only, no secret values.
       // 'blocked' = cannot proceed until Meta is configured at all.
-      const wizardSteps = [
-        { key: 'meta_business', title_ar: 'حساب Meta Business', status: cfg.wabaId ? 'done' : 'pending' },
-        { key: 'dedicated_number', title_ar: 'رقم مخصص للخدمة', status: cfg.phoneId ? 'done' : 'pending' },
-        { key: 'env_vars', title_ar: 'متغيرات البيئة', status: (verify && hmac && metaConfigured) ? 'done' : 'pending' },
-        { key: 'webhook', title_ar: 'تحقق Webhook', status: (verify && hmac) ? 'done' : 'pending' },
-        { key: 'meta_connection', title_ar: 'اختبار اتصال Meta', status: metaConfigured ? 'pending' : 'blocked' },
-        { key: 'templates', title_ar: 'اعتماد القوالب لدى Meta', status: db.templates.some((t) => t.meta_status === 'approved') ? 'done' : (metaConfigured ? 'pending' : 'blocked') },
-        { key: 'test_message', title_ar: 'رسالة اختبار', status: metaConfigured ? 'pending' : 'blocked' },
-      ];
+      const wizardSteps = computeWizardSteps();
       return send(res, 200, {
         // health is now computed (Meta fully configured), not hardcoded.
         health: metaConfigured,
@@ -1720,9 +1447,16 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true, dry_run: false, configured: true, updated, total_from_meta: rows.length, synced_at: new Date().toISOString(), templates: db.templates.map((t) => ({ id: t.id, name: t.name, approval_status: t.approval_status, meta_status: t.meta_status })) }, p);
     }
 
-    // ---- Connection checklist (10 steps; any authenticated user) ----
+    // ---- Old 10-step checklist: DELETED as a separate wizard, kept only
+    // as a redirect to the one 7-step wizard (/api/whatsapp/linking).
+    // No second linking flow exists anywhere in the UI or API.
     if (p === '/api/connection-checklist' && req.method === 'GET') {
-      return send(res, 200, CHECKLIST_STEPS.map((s) => ({ ...s, status: 'pending' })), p);
+      return send(res, 200, { deprecated: true, redirect: '/api/whatsapp/linking', ...linkingPayload() }, p);
+    }
+    // ---- The ONE linking wizard (7 steps, server-driven) ----
+    if (p === '/api/whatsapp/linking' && req.method === 'GET') {
+      if (!can(user, 'whatsapp', 'view')) return forbidden();
+      return send(res, 200, linkingPayload(), p);
     }
 
     // ---- Users (users:manage only) ----
@@ -1912,6 +1646,16 @@ const server = http.createServer(async (req, res) => {
       if (url.searchParams.has('assigned_to')) list = list.filter((c) => String(c.assigned_to) === url.searchParams.get('assigned_to'));
       if (url.searchParams.has('contract_id')) list = list.filter((c) => String(c.contract_id) === url.searchParams.get('contract_id'));
       if (url.searchParams.has('party')) list = list.filter((c) => c.party === url.searchParams.get('party'));
+      if (url.searchParams.has('tag')) { const tg = url.searchParams.get('tag').trim().toLowerCase(); if (tg) list = list.filter((c) => (c.labels || []).some((l) => String(l).toLowerCase() === tg)); }
+      if (url.searchParams.has('q')) {
+        const q = url.searchParams.get('q').trim().toLowerCase();
+        const qDigits = q.replace(/^\+/, '').replace(/[\s\-()]/g, '');
+        if (q) list = list.filter((c) => {
+          const contract = db.contracts.find((x) => x.id === c.contract_id);
+          const hay = [c.phone || '', contract ? contract.code : '', contract ? contract.product_description : '', c.party].join(' ').toLowerCase();
+          return hay.includes(q) || (qDigits && phoneKey(c.phone || '').includes(qDigits)) || (contract && (phoneKey(contract.buyer_phone).includes(qDigits) || phoneKey(contract.seller_phone).includes(qDigits)));
+        });
+      }
       if (url.searchParams.get('unread') === 'true') list = list.filter((c) => (c.unread_count || 0) > 0);
       return send(res, 200, list, p);
     }
@@ -1936,6 +1680,10 @@ const server = http.createServer(async (req, res) => {
         if (body.status !== undefined && !CONVERSATION_STATUSES.includes(body.status)) return send(res, 400, { error: 'status must be one of: ' + CONVERSATION_STATUSES.join(', ') }, p);
         if (body.status !== undefined) conv.status = body.status;
         if (body.assigned_to !== undefined) conv.assigned_to = body.assigned_to;
+        if (body.labels !== undefined) {
+          if (!Array.isArray(body.labels) || body.labels.some((l) => typeof l !== 'string') || body.labels.length > 20) return send(res, 400, { error: 'labels must be an array of at most 20 strings' }, p);
+          conv.labels = body.labels.map((l) => String(l).trim()).filter(Boolean);
+        }
         audit(actor, 'conversation', conv.id, 'updated'); save(); return send(res, 200, conv, p);
       }
     }
@@ -1978,6 +1726,7 @@ const server = http.createServer(async (req, res) => {
       if (url.searchParams.has('direction')) list = list.filter((m) => m.direction === url.searchParams.get('direction'));
       if (url.searchParams.get('internal') === 'false') list = list.filter((m) => !m.is_internal_note);
       if (url.searchParams.get('internal') === 'true') list = list.filter((m) => !!m.is_internal_note);
+      if (url.searchParams.has('q')) { const q = url.searchParams.get('q').trim().toLowerCase(); if (q) list = list.filter((m) => String(m.body || '').toLowerCase().includes(q) || String(m.template_name || '').toLowerCase().includes(q)); }
       return send(res, 200, list, p);
     }
     if (p === '/api/messages' && req.method === 'POST') {
@@ -2317,6 +2066,152 @@ const server = http.createServer(async (req, res) => {
       const r = await metaRequest('GET', '/' + encodeURIComponent(mediaUrlMatch[1]), null);
       if (!r.ok) return send(res, 502, { ok: false, configured: true, meta_error_code: r.meta_error_code || null, error: r.error || 'meta request failed' }, p);
       return send(res, 200, { ok: true, configured: true, media_id: mediaUrlMatch[1], download_url: (r.data && r.data.url) || null, mime_type: (r.data && r.data.mime_type) || null, file_size: (r.data && r.data.file_size) || null }, p);
+    }
+
+    // ---- Unified workspace additions (Stage 2-4): tags, quick replies,
+    // macros (one engine), scheduled contract reminders, reports ----
+    const convTagsMatch = p.match(/^\/api\/conversations\/(\d+)\/tags$/);
+    if (convTagsMatch && req.method === 'POST') {
+      if (!can(user, 'inbox', 'edit')) return forbidden();
+      const conv = db.conversations.find((x) => x.id === Number(convTagsMatch[1]));
+      if (!conv) return send(res, 404, { error: 'conversation not found' }, p);
+      if (!Array.isArray(body.labels) || body.labels.some((l) => typeof l !== 'string') || body.labels.length > 20) return send(res, 400, { error: 'labels must be an array of at most 20 strings' }, p);
+      conv.labels = body.labels.map((l) => String(l).trim()).filter(Boolean);
+      audit(actor, 'conversation', conv.id, 'tags_updated', { labels: conv.labels }); save();
+      return send(res, 200, conv, p);
+    }
+    // Quick replies (canned responses, `/shortcut` in the composer).
+    // Stored server-side so every operator sees the same library; they
+    // insert text into the composer only — nothing is auto-sent.
+    if (p === '/api/quick-replies' && req.method === 'GET') {
+      if (!can(user, 'inbox', 'view')) return forbidden();
+      return send(res, 200, db.quick_replies, p);
+    }
+    if (p === '/api/quick-replies' && req.method === 'POST') {
+      if (!can(user, 'inbox', 'edit')) return forbidden();
+      if (!body.shortcut || !/^\/[a-z0-9_\-]+$/.test(String(body.shortcut))) return send(res, 400, { error: 'shortcut must start with / and contain only lowercase letters, digits, _ or -' }, p);
+      if (!body.body || !String(body.body).trim()) return send(res, 400, { error: 'body is required' }, p);
+      if (db.quick_replies.some((q) => q.shortcut === body.shortcut)) return send(res, 409, { error: 'quick reply shortcut already exists' }, p);
+      const q = { id: nextId(), shortcut: body.shortcut, body: String(body.body).slice(0, 2000), created_at: new Date().toISOString() };
+      db.quick_replies.push(q); audit(actor, 'quick_reply', q.id, 'quick_reply_created', { shortcut: q.shortcut }); save();
+      return send(res, 201, q, p);
+    }
+    const qrMatch = p.match(/^\/api\/quick-replies\/(\d+)$/);
+    if (qrMatch && req.method === 'DELETE') {
+      if (!can(user, 'inbox', 'edit')) return forbidden();
+      const q = db.quick_replies.find((x) => x.id === Number(qrMatch[1]));
+      if (!q) return send(res, 404, { error: 'quick reply not found' }, p);
+      db.quick_replies = db.quick_replies.filter((x) => x.id !== q.id);
+      audit(actor, 'quick_reply', q.id, 'quick_reply_deleted', { shortcut: q.shortcut }); save();
+      return send(res, 200, { ok: true, deleted_id: q.id }, p);
+    }
+    // Macros: saved multi-action sequences run by one click. A macro IS a
+    // workflow (category 'macro', trigger manual) in the ONE engine —
+    // there is no second macro store and no second executor. Money steps
+    // are rejected at save (below) and again at execution (runAutomation).
+    if (p === '/api/automation/macros' && req.method === 'GET') {
+      if (!can(user, 'automation', 'view')) return forbidden();
+      return send(res, 200, db.workflows.filter((w) => w.category === 'macro'), p);
+    }
+    if (p === '/api/automation/macros' && req.method === 'POST') {
+      if (!can(user, 'automation', 'create')) return forbidden();
+      if (!body.name) return send(res, 400, { error: 'name is required' }, p);
+      if (hasBannedStep(body.steps)) return send(res, 400, { error: 'money steps are never allowed in a macro: ' + BANNED_STEP_TYPES.join(', ') }, p);
+      const w = { id: nextId(), name: body.name, category: 'macro', trigger_type: 'manual', trigger_value: null, steps: normaliseSteps(body.steps), is_active: true };
+      db.workflows.push(w); audit(actor, 'workflow', w.id, 'macro_created'); save();
+      return send(res, 201, w, p);
+    }
+    const macroRunMatch = p.match(/^\/api\/automation\/macros\/(\d+)\/run$/);
+    if (macroRunMatch && req.method === 'POST') {
+      if (!can(user, 'automation', 'edit')) return forbidden();
+      const w = db.workflows.find((x) => x.id === Number(macroRunMatch[1]) && x.category === 'macro');
+      if (!w) return send(res, 404, { error: 'macro not found' }, p);
+      const conv = db.conversations.find((x) => x.id === Number(body.conversation_id));
+      if (!conv) return send(res, 400, { error: 'conversation_id is required' }, p);
+      if (hasBannedStep(w.steps)) return send(res, 400, { error: 'money steps are never allowed in a macro: ' + BANNED_STEP_TYPES.join(', ') }, p);
+      const r = await runAutomation(conv, { ...w, _kind: 'workflow' }, { manual: true, inboundText: body.inbound_text || '' });
+      return send(res, 200, { ok: r.ran, ...r, workflow_id: w.id, conversation_id: conv.id }, p);
+    }
+    // Scheduled runs: ONLY contract-linked reminders. The caller names a
+    // contract; only workflows/rules with trigger_type scheduled_reminder
+    // run, against that contract's conversations. No campaign, no broadcast.
+    if (p === '/api/automation/scheduled-run' && req.method === 'POST') {
+      if (!can(user, 'automation', 'edit')) return forbidden();
+      const contract = db.contracts.find((x) => x.id === Number(body.contract_id));
+      if (!contract) return send(res, 400, { error: 'contract_id is required and must match an existing contract' }, p);
+      const convs = db.conversations.filter((c) => c.contract_id === contract.id);
+      const candidates = allAutomationCandidates().filter((w) => w.trigger_type === 'scheduled_reminder' || w.trigger_type === 'scheduled');
+      const results = [];
+      for (const conv of convs) {
+        for (const w of candidates) {
+          if (hasBannedStep(w.steps || w.actions)) { automationLog(conv, w, 'blocked_money_step', {}); continue; }
+          results.push(await runAutomation(conv, w, { manual: true, inboundText: '' }));
+        }
+      }
+      audit(actor, 'automation', 0, 'scheduled_run', { contract_id: contract.id, runs: results.length });
+      save();
+      return send(res, 200, { ok: true, contract_id: contract.id, conversations: convs.length, candidates: candidates.length, results }, p);
+    }
+    // Reports: REAL numbers from the server only — never demo numbers.
+    // First-response time = first inbound -> first later outbound, per
+    // conversation, averaged over conversations that have both.
+    if (p === '/api/reports/summary' && req.method === 'GET') {
+      if (!can(user, 'dashboard', 'view')) return forbidden();
+      const byState = {};
+      for (const st of STATES) byState[st] = db.contracts.filter((c) => c.state === st).length;
+      const unreadTotal = db.conversations.reduce((s, c) => s + (c.unread_count || 0), 0);
+      const frtMinutes = [];
+      for (const conv of db.conversations) {
+        const msgs = db.messages.filter((m) => m.conversation_id === conv.id && !m.is_internal_note).sort((a, b) => a.id - b.id);
+        const firstIn = msgs.find((m) => m.direction === 'in');
+        if (!firstIn) continue;
+        const firstOut = msgs.find((m) => m.direction === 'out' && m.id > firstIn.id);
+        if (!firstOut) continue;
+        const t1 = Date.parse(firstIn.created_at), t2 = Date.parse(firstOut.created_at);
+        if (Number.isFinite(t1) && Number.isFinite(t2) && t2 >= t1) frtMinutes.push((t2 - t1) / 60000);
+      }
+      const avgFrt = frtMinutes.length ? Math.round(frtMinutes.reduce((a, b) => a + b, 0) / frtMinutes.length) : null;
+      const logByOutcome = {};
+      for (const l of db.automation_logs) logByOutcome[l.outcome] = (logByOutcome[l.outcome] || 0) + 1;
+      return send(res, 200, {
+        generated_at: new Date().toISOString(),
+        contracts_total: db.contracts.length,
+        contracts_by_state: byState,
+        conversations_total: db.conversations.length,
+        unread_total: unreadTotal,
+        open_tasks: db.tasks.filter((t) => t.status === 'open').length,
+        templates_total: db.templates.length,
+        templates_local_approved: db.templates.filter((t) => t.approval_status === 'approved').length,
+        templates_meta_approved: db.templates.filter((t) => t.meta_status === 'approved').length,
+        templates_meta_rejected: db.templates.filter((t) => t.meta_status === 'rejected').length,
+        automation_logs_total: db.automation_logs.length,
+        automation_by_outcome: logByOutcome,
+        kill_switch: !!db.killSwitch,
+        first_response: { conversations_measured: frtMinutes.length, avg_minutes: avgFrt },
+        audit_total: db.audit.length,
+        contacts_total: db.contacts.length,
+        uploads_total: db.uploads.length,
+      }, p);
+    }
+    if (p === '/api/reports/audit.csv' && req.method === 'GET') {
+      if (!can(user, 'audit', 'view')) return forbidden();
+      const lines = [['id', 'actor', 'entity', 'entity_id', 'action', 'created_at'].join(',')];
+      for (const a of db.audit) lines.push([a.id, csvEscape(a.actor), csvEscape(a.entity), a.entity_id, csvEscape(a.action), csvEscape(a.created_at)].join(','));
+      res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="audit.csv"', ...securityHeaders(p) });
+      return res.end('\ufeff' + lines.join('\r\n'));
+    }
+    // Media delete: removes the stored file record (and disk file) only.
+    // Messages that used the file keep their own media metadata.
+    const uploadDeleteMatch = p.match(/^\/api\/whatsapp\/uploads\/(\d+)$/);
+    if (uploadDeleteMatch && req.method === 'DELETE') {
+      if (!can(user, 'whatsapp', 'edit')) return forbidden();
+      const rec = db.uploads.find((x) => x.id === Number(uploadDeleteMatch[1]));
+      if (!rec) return send(res, 404, { error: 'upload not found' }, p);
+      try { const fullPath = path.join(UPLOAD_DIR, path.basename(rec.stored_filename)); if (fullPath.startsWith(UPLOAD_DIR)) fs.unlinkSync(fullPath); } catch {}
+      db.uploads = db.uploads.filter((x) => x.id !== rec.id);
+      audit(actor, 'whatsapp_upload', rec.id, 'whatsapp_upload_deleted', { filename: rec.sanitized_filename });
+      save();
+      return send(res, 200, { ok: true, deleted_id: rec.id }, p);
     }
 
     // ---- Audit: GET only (any other method falls through to 404) ----

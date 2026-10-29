@@ -170,6 +170,21 @@ code{word-break:break-all;background:#f1f5f9;padding:2px 6px;border-radius:5px;f
 .check{display:flex;gap:8px;align-items:center;margin:10px 0;cursor:pointer}
 .check input{width:auto;accent-color:var(--teal)}
 
+/* ---- WhatsApp workspace (ONE inbox: list right, chat centre, drawer left at >=820px in RTL; phone: list top, chat below) ---- */
+.wa-workspace{display:flex;flex-direction:column;gap:16px}
+.wa-grid{display:grid;grid-template-columns:320px 1fr;gap:16px;align-items:start}
+.wa-grid:has(.wa-drawer){grid-template-columns:320px 1fr 300px}
+.wa-list,.wa-chat,.wa-drawer{min-width:0}
+.wa-chat-head{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:flex-start}
+.wa-chat-head h2{margin:0}
+.wa-composer{position:sticky;bottom:0;background:#fff;border-top:1px solid var(--line-soft);padding:12px 0 2px;margin-top:12px;z-index:5}
+@media(max-width:1024px){
+  .wa-grid,.wa-grid:has(.wa-drawer){grid-template-columns:1fr}
+}
+@media(max-width:819px){
+  .wa-composer{position:sticky;bottom:0}
+}
+
 /* ---- Workflow ---- */
 .steps{display:flex;flex-direction:column;gap:12px;margin:12px 0}
 .step{border:1px solid var(--line);border-radius:var(--radius);padding:14px;background:#f8fafc;box-shadow:var(--shadow)}

@@ -198,9 +198,11 @@ server.listen(PORT, async () => {
     const rules = await api('/api/automation/rules');
     check('automation rules list', rules.body.length >= 1);
 
-    // ---- New: connection checklist has exactly 10 steps ----
+    // ---- Unified: old 10-step checklist is only a redirect to the one 7-step wizard ----
     const checklist = await api('/api/connection-checklist');
-    check('connection checklist 10 steps', Array.isArray(checklist.body) && checklist.body.length === 10 && checklist.body[0].key === 'meta_business' && checklist.body[9].key === 'client_acceptance', JSON.stringify(checklist.body));
+    check('old checklist redirects to one wizard (deprecated flag)', checklist.status === 200 && checklist.body.deprecated === true && checklist.body.redirect === '/api/whatsapp/linking' && Array.isArray(checklist.body.steps) && checklist.body.steps.length === 7, JSON.stringify(checklist.body));
+    const linking = await api('/api/whatsapp/linking');
+    check('one linking wizard has exactly 7 server-driven steps', linking.status === 200 && Array.isArray(linking.body.steps) && linking.body.steps.length === 7 && linking.body.steps[0].key === 'meta_business' && linking.body.steps[6].key === 'test_message' && !JSON.stringify(linking.body).includes('WHATSAPP_ACCESS_TOKEN'), JSON.stringify(linking.body));
 
     // ---- New: audit is GET-only ----
     const auditPost = await api('/api/audit', { method: 'POST', body: JSON.stringify({}) });
@@ -661,7 +663,78 @@ server.listen(PORT, async () => {
     // Stage C test-data cleanup (the harness also removes data.json + uploads on exit).
     for (const cid of [cBuyer.body.id, cSeller.body.id, ...((cImp.body && cImp.body.created_ids) || [])]) { try { await api(`/api/contacts/${cid}`, { method: 'DELETE' }); } catch {} }
 
+
+    // ---- Unified rebuild: workspace, tags, quick replies, macros, scheduled, reports ----
+    const convsAll = await api('/api/conversations');
+    const anyConv = convsAll.body[0];
+    check('unified test precondition: a conversation exists', !!anyConv, JSON.stringify(convsAll.body.slice(0, 1)));
+    const tagsSet = await api(`/api/conversations/${anyConv.id}/tags`, { method: 'POST', body: JSON.stringify({ labels: ['متابعة', 'vip'] }) });
+    check('unified conversation tags set', tagsSet.status === 200 && tagsSet.body.labels.includes('متابعة'), JSON.stringify(tagsSet.body));
+    const tagsBad = await api(`/api/conversations/${anyConv.id}/tags`, { method: 'POST', body: JSON.stringify({ labels: 'not-an-array' }) });
+    check('unified conversation tags reject non-array', tagsBad.status === 400);
+    const tagFilter = await api('/api/conversations?tag=' + encodeURIComponent('متابعة'));
+    check('unified conversations filter by tag', tagFilter.status === 200 && tagFilter.body.some((c) => c.id === anyConv.id), JSON.stringify(tagFilter.body.map((c) => c.id)));
+    const convSearch = await api('/api/conversations?q=' + encodeURIComponent('PS-'));
+    check('unified conversations search by contract code', convSearch.status === 200 && convSearch.body.length >= 1, JSON.stringify(convSearch.body.map((c) => c.id)));
+    const markerMsg = await api('/api/messages', { method: 'POST', body: JSON.stringify({ conversation_id: anyConv.id, direction: 'out', sender_name: 'operator', body: 'UNIFIED-SEARCH-MARKER-42', is_internal_note: false }) });
+    check('unified marker message created', markerMsg.status === 201, JSON.stringify(markerMsg.body));
+    const msgSearch = await api('/api/messages?q=UNIFIED-SEARCH-MARKER-42');
+    check('unified in-chat/message search finds marker', msgSearch.status === 200 && msgSearch.body.some((m) => m.id === markerMsg.body.id), JSON.stringify(msgSearch.body.map((m) => m.id)));
+    const qrCreate = await api('/api/quick-replies', { method: 'POST', body: JSON.stringify({ shortcut: '/welcome', body: 'أهلاً بك، كيف أخدمك؟' }) });
+    check('unified quick reply created', qrCreate.status === 201 && qrCreate.body.shortcut === '/welcome', JSON.stringify(qrCreate.body));
+    const qrDup = await api('/api/quick-replies', { method: 'POST', body: JSON.stringify({ shortcut: '/welcome', body: 'dup' }) });
+    check('unified quick reply duplicate shortcut rejected (409)', qrDup.status === 409);
+    const qrBad = await api('/api/quick-replies', { method: 'POST', body: JSON.stringify({ shortcut: 'welcome', body: 'no slash' }) });
+    check('unified quick reply shortcut must start with /', qrBad.status === 400);
+    const qrList = await api('/api/quick-replies');
+    check('unified quick replies list contains new shortcut', qrList.status === 200 && qrList.body.some((q) => q.shortcut === '/welcome'), JSON.stringify(qrList.body));
+    const macroMoney = await api('/api/automation/macros', { method: 'POST', body: JSON.stringify({ name: 'bad macro', steps: [{ step_type: 'condition', then: [{ step_type: 'release_money' }] }] }) });
+    check('unified macro rejects money step nested in a branch (save-time)', macroMoney.status === 400, JSON.stringify(macroMoney.body));
+    const macroOk = await api('/api/automation/macros', { method: 'POST', body: JSON.stringify({ name: 'ماكرو ترحيب', steps: [{ step_type: 'text', body: 'أهلاً بك' }] }) });
+    check('unified macro created as one-engine workflow', macroOk.status === 201 && macroOk.body.category === 'macro', JSON.stringify(macroOk.body));
+    const macroList = await api('/api/automation/macros');
+    check('unified macros list returns only macros', macroList.status === 200 && macroList.body.some((w) => w.id === macroOk.body.id) && macroList.body.every((w) => w.category === 'macro'), JSON.stringify(macroList.body.map((w) => w.id)));
+    const macroRun = await api(`/api/automation/macros/${macroOk.body.id}/run`, { method: 'POST', body: JSON.stringify({ conversation_id: anyConv.id }) });
+    check('unified macro runs through the one engine', macroRun.status === 200 && macroRun.body.workflow_id === macroOk.body.id, JSON.stringify(macroRun.body));
+    const schedWf = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'تذكير مجدول', trigger_type: 'scheduled_reminder', trigger_value: 'contract', steps: [{ step_type: 'text', body: 'تذكير بعقدك' }] }) });
+    check('unified scheduled_reminder workflow created', schedWf.status === 201, JSON.stringify(schedWf.body));
+    const schedRun = await api('/api/automation/scheduled-run', { method: 'POST', body: JSON.stringify({ contract_id: id }) });
+    check('unified scheduled-run runs only contract-linked reminders', schedRun.status === 200 && schedRun.body.contract_id === id && schedRun.body.candidates >= 1 && Array.isArray(schedRun.body.results) && schedRun.body.results.length >= 1, JSON.stringify(schedRun.body));
+    const schedNoContract = await api('/api/automation/scheduled-run', { method: 'POST', body: JSON.stringify({}) });
+    check('unified scheduled-run without contract rejected (400)', schedNoContract.status === 400);
+    const schedMoney = await api('/api/workflows', { method: 'POST', body: JSON.stringify({ name: 'sched bad', trigger_type: 'scheduled_reminder', steps: [{ step_type: 'condition', else: [{ step_type: 'confirm_payment' }] }] }) });
+    check('unified scheduled workflow rejects money step in else branch', schedMoney.status === 400);
+    const report = await api('/api/reports/summary');
+    check('unified reports summary has real numbers only', report.status === 200 && typeof report.body.contracts_total === 'number' && report.body.contracts_total >= 1 && typeof report.body.unread_total === 'number' && report.body.first_response && 'avg_minutes' in report.body.first_response && typeof report.body.templates_meta_approved === 'number', JSON.stringify(report.body));
+    const auditCsvRes = await fetch(base + '/api/reports/audit.csv', { headers: { Authorization: 'Bearer ' + token } });
+    const auditCsvText = await auditCsvRes.text();
+    check('unified audit CSV export has header + rows', auditCsvRes.status === 200 && /text\/csv/.test(auditCsvRes.headers.get('content-type') || '') && auditCsvText.includes('actor,entity') && auditCsvText.length > 100, auditCsvText.slice(0, 200));
+    // Media delete must not delete messages that used the file.
+    const upBoundary = '----UnifiedDel' + crypto.randomBytes(6).toString('hex');
+    const upParts = [Buffer.from(`--${upBoundary}\r\nContent-Disposition: form-data; name="file"; filename="todelete.png"\r\nContent-Type: image/png\r\n\r\n`), Buffer.from('fakepng'), Buffer.from(`\r\n--${upBoundary}--\r\n`)];
+    const upRes = await fetch(base + '/api/whatsapp/upload', { method: 'POST', headers: { 'Content-Type': `multipart/form-data; boundary=${upBoundary}`, Authorization: 'Bearer ' + token }, body: Buffer.concat(upParts) });
+    const upBody = await upRes.json().catch(() => ({}));
+    check('unified upload for delete test stored', upRes.status === 201 && upBody.upload && upBody.upload.id, JSON.stringify(upBody));
+    const msgsBefore = await api('/api/messages');
+    const delUp = await api(`/api/whatsapp/uploads/${upBody.upload.id}`, { method: 'DELETE' });
+    check('unified media delete succeeds', delUp.status === 200 && delUp.body.ok === true, JSON.stringify(delUp.body));
+    const msgsAfter = await api('/api/messages');
+    check('unified media delete never deletes messages', msgsAfter.body.length === msgsBefore.body.length, `${msgsBefore.body.length} vs ${msgsAfter.body.length}`);
+    const delAgain = await api(`/api/whatsapp/uploads/${upBody.upload.id}`, { method: 'DELETE' });
+    check('unified deleted media returns 404 on second delete', delAgain.status === 404);
+    const qrDel = await api(`/api/quick-replies/${qrCreate.body.id}`, { method: 'DELETE' });
+    check('unified quick reply deleted', qrDel.status === 200 && qrDel.body.ok === true, JSON.stringify(qrDel.body));
+    // Module split: the new backend modules load and enforce the same rules.
+    const autoMod = require('./automation.js');
+    check('unified backend module: money step rejected recursively', autoMod.hasBannedStep([{ step_type: 'condition', then: [{ step_type: 'refund_money' }] }]) === true && autoMod.hasBannedStep([{ step_type: 'text' }]) === false);
+    check('unified backend module: Arabic normalisation + exact-before-contains', autoMod.normalizeArabic('عَقْدٌ جديد') === autoMod.normalizeArabic('عقد جديد') && autoMod.keywordMatchKind('عقد', 'عقد جديد') === 'contains');
+    const waMod = require('./whatsapp.js');
+    check('unified backend module: 24h window + status ranking', waMod.within24h(new Date().toISOString()) === true && waMod.within24h('2020-01-01T00:00:00.000Z') === false && waMod.newerStatus('sent', 'delivered') === 'delivered' && waMod.newerStatus('read', 'sent') === 'read' && waMod.newerStatus('read', 'failed') === 'failed');
+    const ctMod = require('./contracts.js');
+    check('unified backend module: 12 states + transition guard', ctMod.STATES.length === 12 && ctMod.canTransition('draft', 'issued') === true && ctMod.canTransition('draft', 'completed') === false);
+
     mockServer.close();
+
   } catch (e) { failed++; console.log('FAIL exception', e); }
   console.log(`RESULT passed=${passed} failed=${failed}`);
   server.close(() => {

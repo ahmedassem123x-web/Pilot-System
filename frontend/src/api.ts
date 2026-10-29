@@ -4,7 +4,7 @@
 // `Authorization: Bearer <token>` on every request. On a 401 the token is
 // cleared and a `ps:unauthorized` event is fired so the app can show the
 // login screen again. No password or secret value is ever stored here.
-import type { AuditEntry, Contact, ContactImportReport, Contract, Conversation, Message, Task, Template, User, EmbeddedSignupCallbackResult, EmbeddedSignupConfig, WhatsAppSendInput, WhatsAppSendResult, WhatsAppStatusFull, WhatsAppTemplateCreateInput, WhatsAppTemplateSubmitResult, WhatsAppTemplateSyncResult, WhatsAppTemplateUpdateInput, WhatsAppTestTokenResult, Workflow, WorkflowStep } from './types';
+import type { AuditEntry, Contact, LinkingPayload, QuickReply, ReportSummary, ContactImportReport, Contract, Conversation, Message, Task, Template, User, EmbeddedSignupCallbackResult, EmbeddedSignupConfig, WhatsAppSendInput, WhatsAppSendResult, WhatsAppStatusFull, WhatsAppTemplateCreateInput, WhatsAppTemplateSubmitResult, WhatsAppTemplateSyncResult, WhatsAppTemplateUpdateInput, WhatsAppTestTokenResult, Workflow, WorkflowStep } from './types';
 
 const TOKEN_KEY = 'ps_token';
 export function getToken(): string | null { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } }
@@ -130,6 +130,19 @@ export const api = {
     return reqForm<{ ok: boolean; dry_run?: boolean; configured?: boolean; wamid?: string; upload: WhatsAppUpload; message?: unknown; error?: string }>('/api/whatsapp/upload', form);
   },
   whatsappUploads: () => req<WhatsAppUpload[]>('/api/whatsapp/uploads'),
+  deleteUpload: (id: number) => req<{ ok: boolean }>(`/api/whatsapp/uploads/${id}`, { method: 'DELETE' }),
+  linking: () => req<LinkingPayload>('/api/whatsapp/linking'),
+  quickReplies: () => req<QuickReply[]>('/api/quick-replies'),
+  createQuickReply: (b: { shortcut: string; body: string }) => req<QuickReply>('/api/quick-replies', { method: 'POST', body: JSON.stringify(b) }),
+  deleteQuickReply: (id: number) => req<{ ok: boolean }>(`/api/quick-replies/${id}`, { method: 'DELETE' }),
+  setConversationTags: (id: number, labels: string[]) => req<Conversation>(`/api/conversations/${id}/tags`, { method: 'POST', body: JSON.stringify({ labels }) }),
+  updateConversation: (id: number, b: { status?: string; assigned_to?: string | null; labels?: string[] }) => req<Conversation>(`/api/conversations/${id}`, { method: 'PUT', body: JSON.stringify(b) }),
+  macros: () => req<Workflow[]>('/api/automation/macros'),
+  createMacro: (b: { name: string; steps: WorkflowStep[] }) => req<Workflow>('/api/automation/macros', { method: 'POST', body: JSON.stringify(b) }),
+  runMacro: (id: number, conversation_id: number) => req<{ ok: boolean; outcome?: string; blocked_reason?: string }>(`/api/automation/macros/${id}/run`, { method: 'POST', body: JSON.stringify({ conversation_id }) }),
+  scheduledRun: (contract_id: number) => req<{ ok: boolean; results: unknown[] }>(`/api/automation/scheduled-run`, { method: 'POST', body: JSON.stringify({ contract_id }) }),
+  reportsSummary: () => req<ReportSummary>('/api/reports/summary'),
+  auditCsv: () => reqText('/api/reports/audit.csv'),
   whatsappMediaUrl: (mediaId: string) =>
     req<{ ok: boolean; configured: boolean; download_url: string | null; mime_type?: string | null }>(`/api/whatsapp/media/${encodeURIComponent(mediaId)}`),
   // Stage B: automation execution controls (automation:edit for run /

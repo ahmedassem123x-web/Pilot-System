@@ -35,7 +35,7 @@ const NAV: NavItem[] = [
   // additionally require their own section (dual gating, see below).
   { id: 'whatsapp', label: 'واتساب', section: 'whatsapp', icon: IconLink, subs: [
     { id: 'connection', label: 'الربط والحسابات' },
-    { id: 'inbox', label: 'الإنبكس', section: 'inbox' },
+    { id: 'inbox', label: 'الإنبكس', section: 'inbox' }, // same single WhatsAppWorkspace component as the main Inbox tab — not a second inbox
     { id: 'templates', label: 'القوالب' },
     { id: 'automation', label: 'الأتمتة', section: 'automation' },
     { id: 'contacts', label: 'جهات الاتصال' },
@@ -57,7 +57,7 @@ const NAV: NavItem[] = [
   { id: 'audit', label: 'التدقيق والتقارير', section: 'audit', icon: IconReport, subs: [] },
   { id: 'settings', label: 'إعدادات النظام', section: 'settings', icon: IconSettings, subs: [
     { id: 'system', label: 'إعدادات النظام' },
-    { id: 'checklist', label: 'قائمة الربط (10 خطوات)' },
+    { id: 'checklist', label: 'معالج الربط (7 خطوات)' },
   ] },
 ];
 const EMPTY: Bundle = { contracts: [], conversations: [], messages: [], tasks: [], workflows: [], templates: [], users: [], audit: [], killSwitch: false, healthOk: false };

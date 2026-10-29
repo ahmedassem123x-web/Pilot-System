@@ -53,11 +53,29 @@ export interface Contract {
   delivery_point: string | null; state: State; clause_fingerprint: string;
   created_at: string; version?: number;
 }
-export interface Conversation { id: number; contract_id: number; party: string; status: string; unread_count: number; assigned_to?: string | null; }
+export interface Conversation { id: number; contract_id: number | null; party: string; phone?: string | null; status: string; unread_count: number; assigned_to?: string | null; labels?: string[]; last_inbound_at?: string | null; }
 export interface Message {
   id: number; conversation_id: number | null; direction: string;
-  sender_name?: string; body: string; template_name: string | null;
+  sender_name?: string; body: string | null; template_name: string | null;
   is_internal_note: boolean; created_at: string;
+  meta_status?: string | null; media_type?: string | null; media_id?: string | null;
+  wamid?: string | null; dry_run?: boolean;
+}
+export interface QuickReply { id: number; shortcut: string; body: string; created_at: string; }
+export interface LinkingPayload {
+  steps: WhatsAppWizardStep[]; done: number; blocked: number; configured: boolean;
+  webhook_verify_configured: boolean; webhook_hmac_configured: boolean;
+  whatsapp_access_configured: boolean; phone_number_configured: boolean; waba_configured: boolean;
+  api_version: string; app_base_url: string | null; webhook_url: string | null;
+  embedded_signup: { configured: boolean; app_id_configured: boolean; config_id_configured: boolean; app_secret_configured: boolean };
+}
+export interface ReportSummary {
+  generated_at: string; contracts_total: number; contracts_by_state: Record<string, number>;
+  conversations_total: number; unread_total: number; open_tasks: number;
+  templates_total: number; templates_local_approved: number; templates_meta_approved: number; templates_meta_rejected: number;
+  automation_logs_total: number; automation_by_outcome: Record<string, number>; kill_switch: boolean;
+  first_response: { conversations_measured: number; avg_minutes: number | null };
+  audit_total: number; contacts_total: number; uploads_total: number;
 }
 export interface Task {
   id: number; contract_id: number; title: string; type: string; status: string;
@@ -186,6 +204,7 @@ export const TRIGGER_TYPES = [
   { type: 'away', ar: 'خارج الدوام' },
   { type: 'fallback', ar: 'احتياطي بعد رسالتين غير مفهومتين' },
   { type: 'manual', ar: 'تشغيل يدوي' },
+  { type: 'scheduled_reminder', ar: 'تذكير مجدول مرتبط بعقد فقط' },
 ] as const;
 
 export const FORBIDDEN_STEP_TYPES = ['release_money', 'refund_money', 'confirm_payment'];
@@ -203,15 +222,5 @@ export const TEMPLATE_AR: Record<string, string> = {
   handover_support: 'تحويل للدعم البشري',
 };
 
-export const CHECKLIST: { title: string; detail: string }[] = [
-  { title: 'حساب Meta Business وتوثيقه', detail: 'التحقق من الحساب التجاري في Meta قبل أي ربط.' },
-  { title: 'رقم واتساب مخصص مرتبط بحساب WhatsApp Business', detail: 'رقم مخصص للخدمة، منفصل عن الرقم الشخصي.' },
-  { title: 'اتفاق مع المؤسسة المالية الخارجية', detail: 'الأموال تُحفظ لدى المؤسسة فقط؛ لا محفظة داخلية ولا ربط بنكي آلي.' },
-  { title: 'اعتماد القوالب العشرة في Meta', detail: 'قوالب Utility بالعربية؛ لا إرسال قبل اعتماد كل قالب.' },
-  { title: 'إدخال بيانات الربط في متغيرات البيئة، وليس في المحادثة', detail: 'لا تُكتب أي مفاتيح أو رموز داخل هذه الواجهة أو أي ملف في المشروع.' },
-  { title: 'ضبط Webhook والتحقق بتوقيع HMAC', detail: 'التحقق من التوقيع عند تفعيل WHATSAPP_APP_SECRET في الخادم.' },
-  { title: 'اختبار رسالة حقيقية من رقم تجريبي', detail: 'رسالة واردة واحدة على الأقل من رقم اختبار قبل التشغيل.' },
-  { title: 'اختبار دورة عقد كاملة', detail: 'من المسودة حتى الإغلاق، مروراً بتأكيد مالي بمرجع مؤسسة.' },
-  { title: 'النسخ الاحتياطي والمراقبة', detail: 'نسخ احتياطي دوري لبيانات العقود وسجل التدقيق.' },
-  { title: 'قبول العميل والتدريب', detail: 'تدريب فريق التشغيل على مفتاح الإيقاف والخطوات اليدوية.' },
-];
+// Old 10-step CHECKLIST deleted: the one wizard is GET /api/whatsapp/linking (7 steps, server-driven).
+
