@@ -216,9 +216,9 @@ export function WhatsAppWorkspace({ b, reload, me }: { b: WorkspaceBundle; reloa
           </div>
           <div className="wa-composer">
             <div className="btn-row">
-              <button className={`btn small ${mode === 'text' ? '' : 'ghost'}`} onClick={() => setMode('text')}>نص</button>
-              <button className={`btn small ${mode === 'template' ? '' : 'ghost'}`} onClick={() => setMode('template')}>قالب</button>
-              <button className={`btn small ${mode === 'media' ? '' : 'ghost'}`} onClick={() => setMode('media')}>وسائط</button>
+              <button title="إرسال نص حر (داخل نافذة 24 ساعة فقط)" className={`btn small ${mode === 'text' ? '' : 'ghost'}`} onClick={() => setMode('text')}>نص</button>
+              <button title="إرسال قالب واتساب معتمد" className={`btn small ${mode === 'template' ? '' : 'ghost'}`} onClick={() => setMode('template')}>قالب</button>
+              <button title="إرفاق وسائط (حتى 16 ميجابايت)" className={`btn small ${mode === 'media' ? '' : 'ghost'}`} onClick={() => setMode('media')}>وسائط</button>
               <label className="check"><input type="checkbox" checked={internal} onChange={(e) => setInternal(e.target.checked)} /> ملاحظة داخلية فقط (لا تُرسل أبداً)</label>
             </div>
             {replyToId && <p className="wa-quote">رد مقتبس على رسالة #{replyToId} — {(thread.find((x) => x.id === replyToId)?.body || thread.find((x) => x.id === replyToId)?.template_name || '').slice(0, 80)} <button className="btn small ghost" onClick={() => setReplyToId(null)}>إلغاء الاقتباس</button></p>}
@@ -228,7 +228,7 @@ export function WhatsAppWorkspace({ b, reload, me }: { b: WorkspaceBundle; reloa
             {mode !== 'media' && <Field label={internal ? 'نص الملاحظة الداخلية' : mode === 'template' ? 'ملاحظة (لا تُرسل مع القالب)' : 'نص الرد — اكتب / لعرض الردود السريعة'}><textarea rows={3} value={body} onChange={(e) => setBody(e.target.value)} placeholder={mode === 'template' ? 'اختياري' : 'اكتب الرد هنا…'} /></Field>}
             {qrMatches.length > 0 && <div className="btn-row">{qrMatches.map((r) => <button key={r.id} className="btn small ghost" onClick={() => setBody(r.body)}>{r.shortcut}</button>)}</div>}
             <div className="btn-row">
-              <button className="btn" disabled={!canEdit} onClick={send}>{internal ? 'حفظ ملاحظة داخلية' : mode === 'media' ? 'رفع وإرسال الوسائط' : 'إرسال'}</button>
+              <button title="إرسال الرد أو حفظ الملاحظة الداخلية" className="btn" disabled={!canEdit} onClick={send}>{internal ? 'حفظ ملاحظة داخلية' : mode === 'media' ? 'رفع وإرسال الوسائط' : 'إرسال ✓'}</button>
               <select className="inline-select" value={macroId} onChange={(e) => setMacroId(e.target.value ? Number(e.target.value) : '')}><option value="">تشغيل ماكرو بضغطة واحدة…</option>{macros.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}</select>
               <button className="btn small ghost" disabled={!canEdit || macroId === ''} onClick={async () => { try { const r = await api.runMacro(Number(macroId), sel.id); setMsg(r.ok ? `تم تنفيذ الماكرو — ${r.outcome || 'done'}.` : `لم يُنفَّذ — ${r.blocked_reason || ''}.`); reload(); } catch (err) { setMsg('خطأ: ' + (err as Error).message); } }}>تشغيل الماكرو</button>
             </div>

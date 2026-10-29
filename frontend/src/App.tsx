@@ -5,7 +5,8 @@ import {
   SystemSettings, Tasks, Templates, Users, WhatsApp, WhatsAppMedia, hasAction, hasSection, type Bundle,
 } from './views';
 import { WorkflowDesigner } from './workflow';
-import { ROLE_AR, type MeUser } from './types';
+import { Sidebar, type MainTab as SideTab } from './sidebar';
+import { type MeUser } from './types';
 import {
   IconBolt, IconChat, IconCheckSquare, IconDoc, IconGrid, IconLink, IconReport,
   IconSettings, IconShield, IconTemplate, IconUsers, IconWorkflow,
@@ -107,6 +108,21 @@ export default function App() {
   const [{ main, sub }, setNav] = useState(parseHash);
   const [data, setData] = useState<Bundle>(EMPTY);
   const [err, setErr] = useState('');
+  // Sidebar V2: collapsed rail persisted; phone never uses it (CSS).
+  const [sideCollapsed, setSideCollapsed] = useState(() => {
+    try { return localStorage.getItem('ps:sidebar-collapsed') === '1'; } catch { return false; }
+  });
+  function toggleSideCollapsed() {
+    setSideCollapsed((v) => {
+      try { localStorage.setItem('ps:sidebar-collapsed', v ? '0' : '1'); } catch { /* storage unavailable */ }
+      return !v;
+    });
+  }
+  // Keep the active phone tab scrolled into view (scroll hint + snap).
+  useEffect(() => {
+    const el = document.querySelector('.topnav .tab.active');
+    if (el) (el as HTMLElement).scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
+  }, [main, sub]);
 
   const reload = useCallback(async () => {
     try {
@@ -167,7 +183,7 @@ export default function App() {
     </div>
   );
 
-  if (!authChecked) return <div className="app"><main><p className="muted">جارٍ التحقق من الجلسة…</p></main></div>;
+  if (!authChecked) return <div className="app"><main><div className="skeleton skeleton-title" /><div className="skeleton" /><div className="skeleton" /><p className="muted">جارٍ التحقق من الجلسة…</p></main></div>;
   if (!me) return <div className="app login-wrap" dir="rtl">
     <header className="topbar">{brand}</header>
     <main>
@@ -201,23 +217,24 @@ export default function App() {
   const topKey = activeTopKey(main, sub);
   const visibleTopTabs = TOP_TABS.filter((t) => hasSection(me, t.section));
 
-  const SIDE_GROUPS: { title: string; ids: MainTab[] }[] = [
-    { title: 'العمل اليومي', ids: ['dashboard', 'contracts', 'inbox'] },
-    { title: 'القنوات والأتمتة', ids: ['whatsapp', 'automation'] },
-    { title: 'الإدارة والمراجعة', ids: ['users', 'audit', 'settings'] },
-  ];
-  return <div className="app">
+  const openTasks = data.tasks.filter((t) => t.status !== 'done').length;
+  return <div className={`app ${sideCollapsed ? 'side-collapsed' : ''}`}>
+    {/* Slim utility bar (web/desktop). Brand lives in the sidebar; the
+        user card + logout live in the sidebar footer — never floating. */}
     <header className="topbar">
-      {brand}
+      <div className="topbar-left">
+        <span className="topbar-brand"><span className="brand-mark small"><IconShield /></span><b>Pilot System</b></span>
+        <span className="page-crumb">{nav.label}{subDef ? ` / ${subDef.label}` : ''}</span>
+      </div>
       <div className="top-status">
         {data.killSwitch && <span className="pill danger">الأتمتة موقوفة</span>}
         {unread > 0 && <button className="pill" onClick={() => go('inbox', 'conversations')}>غير مقروءة: {unread}</button>}
         <span className={`pill ${data.healthOk ? 'ok' : 'danger'}`}><span className="dot" />{data.healthOk ? 'متصل' : 'غير متصل'}</span>
-        <span className="pill">{me.full_name} ({ROLE_AR[me.role]})</span>
-        <button className="pill" onClick={logout}>خروج</button>
       </div>
     </header>
-    {/* Phone-only top tab bar (CSS shows it < 820px, hides it >= 820px). */}
+    {/* Phone-only top tab bar (CSS shows it < 820px, hides it >= 820px).
+        Horizontally scrollable pills; the active tab scrolls into view.
+        No burger, no drawer — the sidebar is never rendered on phone. */}
     <nav className="topnav" aria-label="التنقل الرئيسي">
       {visibleTopTabs.map((t) => {
         const Icon = t.icon;
@@ -228,27 +245,11 @@ export default function App() {
     </nav>
     {err && <div className="errbar">{err}</div>}
     <div className="layout">
-      {/* Desktop-only sidebar (CSS hides it < 820px). Same gating as top tabs. */}
-      <aside className="sidebar">
-        {SIDE_GROUPS.map((g) => {
-          const items = visibleNav.filter((n) => g.ids.includes(n.id));
-          if (items.length === 0) return null;
-          return <div key={g.title} className="side-group">
-            <p className="side-group-title">{g.title}</p>
-            {items.map((n) => {
-              const Icon = n.icon;
-              return <button key={n.id} className={`side-link ${main === n.id ? 'active' : ''}`} onClick={() => go(n.id)}>
-                <Icon />{n.label}{n.id === 'inbox' && unread > 0 && <span className="side-unread">{unread}</span>}
-              </button>;
-            })}
-          </div>;
-        })}
-        <div className="side-guard">
-          <b>ضوابط ثابتة</b>
-          <p>لا محفظة داخلية، لا متجر، لا إجراء مالي آلي. تأكيد الدفع لا يتم إلا بمرجع من المؤسسة المالية الخارجية.</p>
-          <p>بيانات الربط والمفاتيح في متغيرات بيئة الخادم فقط — لا تُدخل هنا أبداً.</p>
-        </div>
-      </aside>
+      {/* Web/desktop sidebar — ONE component, same permission gating as
+          the phone tabs (visibleNav). Collapsed state is frontend-only. */}
+      <Sidebar me={me} main={main as SideTab} visible={visibleNav.map((n) => n.id as SideTab)}
+        unread={unread} openTasks={openTasks} collapsed={sideCollapsed}
+        onToggleCollapse={toggleSideCollapsed} go={(m) => go(m)} logout={logout} />
       <main>
         {activeSubs.length > 0 && <div className="btn-row subnav">
           {activeSubs.map((s) => <button key={s.id} className={`btn small ${sub === s.id ? '' : 'ghost'}`} onClick={() => go(main, s.id)}>{s.label}</button>)}
