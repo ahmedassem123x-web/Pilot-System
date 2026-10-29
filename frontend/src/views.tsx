@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { api, local, type AutomationRule, type ChecklistStep, type WhatsAppStatus } from './api';
+import { api, local, type AutomationRule, type WhatsAppStatus } from './api';
 import { Badge, Card, Empty, Field, LocalNote, fmt, stateTone } from './components';
 import { IconChat, IconCheckSquare, IconDoc, IconInbox, IconPower, IconTemplate } from './icons';
 import {
@@ -325,21 +325,77 @@ export function Tasks({ b, reload }: { b: Bundle; reload: () => void }) {
 }
 
 /* ---------------- Templates ---------------- */
+// Two statuses are shown side by side and never conflated:
+//  - approval_status = LOCAL status only (PUT /api/templates/:id, edited here).
+//  - meta_status = Meta status (approved / pending / rejected / not_submitted),
+//    set only by Submit / Sync against Meta — never by the local dropdown.
 export function Templates({ b, reload, canEdit }: { b: Bundle; reload?: () => void; canEdit?: boolean }) {
-  const tone = (s: string) => s === 'approved' ? 'ok' as const : s === 'rejected' ? 'bad' as const : 'warn' as const;
-  const ar = (s: string) => s === 'approved' ? 'معتمد' : s === 'rejected' ? 'مرفوض' : 'بانتظار الاعتماد';
+  const localTone = (s: string) => s === 'approved' ? 'ok' as const : s === 'rejected' ? 'bad' as const : 'warn' as const;
+  const localAr = (s: string) => s === 'approved' ? 'معتمد محلياً' : s === 'rejected' ? 'مرفوض محلياً' : 'بانتظار الاعتماد المحلي';
+  const metaTone = (s?: string) => s === 'approved' ? 'ok' as const : s === 'rejected' ? 'bad' as const : s === 'not_submitted' ? 'neutral' as const : 'warn' as const;
+  const metaAr = (s?: string) => s === 'approved' ? 'معتمد لدى Meta' : s === 'rejected' ? 'مرفوض لدى Meta' : s === 'not_submitted' ? 'غير مقدَّم إلى Meta' : s === 'pending' ? 'قيد المراجعة لدى Meta' : 'حالة Meta غير معروفة';
   const [msg, setMsg] = useState('');
-  return <Card title="قوالب واتساب Utility" sub="10 قوالب من الخادم — خارج نافذة 24 ساعة لا يُرسل إلا قالب معتمد من Meta. حالة الاعتماد هنا تعكس حالة Meta كما يحدّثها المشرف.">
-    {b.templates.length === 0 ? <Empty text="لا قوالب — تُزرع القوالب العشرة تلقائياً عند أول تشغيل للخادم." /> :
-      <table><thead><tr><th>اسم القالب</th><th>الوصف</th><th>اللغة</th><th>الفئة</th><th>حالة الاعتماد</th>{canEdit && <th>تحديث</th>}</tr></thead>
-      <tbody>{b.templates.map((t) => <tr key={t.id}><td><code>{t.name}</code></td><td>{TEMPLATE_AR[t.name] || '—'}</td><td>{t.language}</td><td>{t.category}</td><td><Badge tone={tone(t.approval_status)}>{ar(t.approval_status)}</Badge></td>
-        {canEdit && <td><select className="inline-select" value={t.approval_status} onChange={async (e) => {
-          try { await api.updateTemplate(t.id, e.target.value); setMsg(`تم تحديث حالة قالب ${t.name} إلى ${ar(e.target.value)}.`); reload?.(); }
-          catch (err) { setMsg('خطأ: ' + (err as Error).message); }
-        }}><option value="pending">بانتظار الاعتماد</option><option value="approved">معتمد</option><option value="rejected">مرفوض</option></select></td>}</tr>)}</tbody></table>}
-    <p className="muted">ملاحظة: الخادم يرسل اسم القالب ولغته وفئته وحالة اعتماده فقط، ولا يرسل نص القالب — لذا لا يُعرض نص هنا ولا يُختلق نص.</p>
-    {msg && <p className="msg">{msg}</p>}
-  </Card>;
+  const [form, setForm] = useState({ name: '', body: '', buttons: '' });
+  const [busy, setBusy] = useState(false);
+  async function submitToMeta(t: Template) {
+    setBusy(true); setMsg('');
+    try { const r = await api.submitWhatsAppTemplate(t.id);
+      setMsg(r.ok ? (r.dry_run ? `وضع تجريبي: لم يُقدَّم قالب ${t.name} إلى Meta لأن الربط غير مكتمل — بقيت حالته «غير مقدَّم».` : `تم تقديم قالب ${t.name} إلى Meta — حالة Meta الآن: ${metaAr(r.meta_status || r.template?.meta_status)}.`) : `لم يُقدَّم قالب ${t.name}: ${r.error || 'خطأ غير معروف'}.`);
+      reload?.(); } catch (err) { setMsg('خطأ في التقديم إلى Meta: ' + (err as Error).message + ' — إذا كان الخادم لا يوفّر هذا الـ endpoint بعد، فالواجهة جاهزة والخادم ما زال قيد التنفيذ.'); }
+    finally { setBusy(false); }
+  }
+  async function syncFromMeta() {
+    setBusy(true); setMsg('');
+    try { const r = await api.syncWhatsAppTemplates();
+      setMsg(r.ok ? `تمت المزامنة من Meta${r.dry_run ? ' (وضع تجريبي: لم تُقرأ حالة حقيقية من Meta).' : ''}${typeof r.updated === 'number' ? ` — حدّثت ${r.updated} قالباً.` : '.'}` : `فشلت المزامنة من Meta: ${r.error || 'خطأ غير معروف'}.`);
+      reload?.(); } catch (err) { setMsg('خطأ في المزامنة من Meta: ' + (err as Error).message + ' — إذا كان الخادم لا يوفّر هذا الـ endpoint بعد، فالواجهة جاهزة والخادم ما زال قيد التنفيذ.'); }
+    finally { setBusy(false); }
+  }
+  return <>
+    <Card title="قوالب واتساب Utility" sub="فئة Utility فقط، بالعربية. خارج نافذة 24 ساعة لا يُرسل إلا قالب معتمد لدى Meta فعلاً — الحالة المحلية وحدها لا تكفي أبداً.">
+      <p className="local-note">الحالتان مختلفتان: «الحالة المحلية» يغيّرها المشرف يدوياً ولا تعني موافقة Meta. «حالة Meta» تأتي من Meta فقط عبر «تقديم إلى Meta» و«مزامنة من Meta».</p>
+      <div className="btn-row">
+        <button className="btn" disabled={!canEdit || busy} onClick={syncFromMeta}>مزامنة من Meta</button>
+        {!canEdit && <span className="muted">المزامنة والتقديم والإنشاء تتطلب صلاحية تعديل واتساب (whatsapp:edit).</span>}
+      </div>
+      {b.templates.length === 0 ? <Empty text="لا قوالب — تُزرع القوالب العشرة تلقائياً عند أول تشغيل للخادم." /> :
+        <div className="table-wrap"><table><thead><tr><th>اسم القالب</th><th>الوصف</th><th>اللغة</th><th>الفئة</th><th>الحالة المحلية (LOCAL)</th><th>حالة Meta</th><th>نص القالب</th>{canEdit && <th>تحديث محلي / تقديم</th>}</tr></thead>
+        <tbody>{b.templates.map((t) => <tr key={t.id}><td><code>{t.name}</code></td><td>{TEMPLATE_AR[t.name] || '—'}</td><td>{t.language}</td><td>{t.category}</td>
+          <td><Badge tone={localTone(t.approval_status)}>{localAr(t.approval_status)}</Badge></td>
+          <td><Badge tone={metaTone(t.meta_status)}>{metaAr(t.meta_status)}</Badge>{t.rejection_reason ? <div className="small">سبب الرفض: {t.rejection_reason}</div> : null}</td>
+          <td>{t.body ? <span className="small">{t.body}</span> : <span className="muted">— لا نص محفوظ في الخادم —</span>}</td>
+          {canEdit && <td><select className="inline-select" value={t.approval_status} onChange={async (e) => {
+            try { await api.updateTemplate(t.id, e.target.value); setMsg(`تم تحديث الحالة المحلية (فقط) لقالب ${t.name} إلى ${localAr(e.target.value)} — هذا لا يغيّر حالة Meta.`); reload?.(); }
+            catch (err) { setMsg('خطأ: ' + (err as Error).message); }
+          }}><option value="pending">بانتظار (محلي)</option><option value="approved">معتمد (محلي)</option><option value="rejected">مرفوض (محلي)</option></select>{' '}
+          <button className="btn small" disabled={busy} onClick={() => submitToMeta(t)}>تقديم إلى Meta</button></td>}</tr>)}</tbody></table></div>}
+      {msg && <p className="msg">{msg}</p>}
+    </Card>
+    {canEdit && <Card title="إنشاء قالب جديد (مسودة محلية)" sub="يُنشأ كمسودة محلية بحالة Meta «غير مقدَّم» — لا يصبح قابلاً للإرسال خارج النافذة إلا بعد تقديمه وموافقة Meta عليه. لا توجد هنا أي بيانات سرية.">
+      <form className="grid2" onSubmit={async (e) => { e.preventDefault(); if (!/^[a-z0-9_]+$/.test(form.name.trim())) { setMsg('اسم القالب: أحرف صغيرة وأرقام وشرطات سفلية فقط.'); return; } if (!form.body.trim()) { setMsg('أدخل نص القالب.'); return; } setBusy(true); try {
+        const buttons = form.buttons.split(',').map((x) => x.trim()).filter(Boolean);
+        const t = await api.createWhatsAppTemplate({ name: form.name.trim(), category: 'UTILITY', language: 'ar', body: form.body.trim(), ...(buttons.length ? { buttons } : {}) });
+        setMsg(`تم إنشاء مسودة القالب «${t.name}» — حالة Meta: غير مقدَّم. قدّمه من الجدول أعلاه بعد مراجعة نصه.`); setForm({ name: '', body: '', buttons: '' }); reload?.();
+      } catch (err) { setMsg('خطأ في إنشاء القالب: ' + (err as Error).message + ' — إذا كان الخادم لا يوفّر هذا الـ endpoint بعد، فالواجهة جاهزة والخادم ما زال قيد التنفيذ.'); } finally { setBusy(false); } }}>
+        <Field label="اسم القالب (أحرف صغيرة وأرقام و_ فقط)"><input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="مثال: order_update" /></Field>
+        <Field label="الفئة (ثابتة)"><input disabled value="UTILITY — إشعار معاملة (Utility)" /></Field>
+        <Field label="اللغة (ثابتة)"><input disabled value="ar — العربية" /></Field>
+        <Field label="أزرار (اختياري — عناوين مفصولة بفواصل)"><input value={form.buttons} onChange={(e) => setForm({ ...form, buttons: e.target.value })} placeholder="مثال: تأكيد، تواصل مع الدعم" /></Field>
+        <div style={{ gridColumn: '1 / -1' }}><Field label="نص القالب — استخدم {{1}} و{{2}}… للمتغيرات بالتسلسل، ولا تبدأ النص بمتغير ولا تنهِ به إن أمكن"><textarea rows={4} required value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} placeholder="مثال: تم إنشاء عقدك رقم {{1}} — سنبلغك عند تأكيد الدفع من المؤسسة المالية." /></Field></div>
+        <button className="btn" type="submit" disabled={busy}>إنشاء مسودة محلية</button>
+      </form>
+      {msg && <p className="msg">{msg}</p>}
+    </Card>}
+    <Card title="عند رفض Meta لقالب — ماذا تفعل؟" sub="لا تعيد تقديم النص نفسه دون تغيير، ولا تعلّم القالب «معتمداً» محلياً لتجاوز الرفض.">
+      <ul>
+        <li><b>مشكلة صيغة:</b> راجع ترقيم المتغيرات {'{{1}}'} و{'{{2}}'}… بالتسلسل دون تكرار أو فجوة، وأصلح قيم الأمثلة إن طُلبت.</li>
+        <li><b>فئة خاطئة:</b> إذا كان النص ترويجياً أو دعوة للشراء أو سؤالاً مفتوحاً، أعد كتابته كإشعار محايد مرتبط بمعاملة موجودة — Utility إشعار مباشر فقط، لا ترويج ولا إلحاح.</li>
+        <li><b>سياسة:</b> أزل أي رابط مختصر أو رابط wa.me، ولا تطلب بيانات حساسة (بطاقات، كلمات سر، رموز تحقق).</li>
+        <li>بعد الإصلاح أعد التقديم وانتظر قرار Meta (خطّط على 24 ساعة). إن كنت متأكداً أن النص مطابق للسياسة، استخدم الاعتراض (Appeal) في WhatsApp Manager بدل إعادة التقديم العشوائية.</li>
+        <li>أثناء الرفض، الميزة التي تعتمد على القالب متوقفة لذلك القالب: لا يُرسل القالب المرفوض أبداً، ولا يُستبدل برسالة حرة خارج نافذة 24 ساعة.</li>
+      </ul>
+    </Card>
+  </>;
 }
 
 /* ---------------- Automation ---------------- */
@@ -543,25 +599,48 @@ export function Checklist() {
 }
 
 /* ---------------- WhatsApp ---------------- */
+// Stage 5 Connection Wizard: 7 steps driven by GET /api/whatsapp/status
+// `wizard_steps` (done = green, pending = amber, blocked = red). If the
+// backend does not yet return wizard_steps, statuses are derived from the
+// old booleans so the wizard still renders honestly — nothing is invented
+// as "done". NO token/secret/WABA/phone input field exists anywhere here:
+// credentials live ONLY in Render Environment Variables (see Step 4).
+const WIZARD_SPEC: { key: string; fallbackTitle: string; detail: string }[] = [
+  { key: 'meta_business', fallbackTitle: 'حساب Meta Business', detail: 'افتح business.facebook.com بحساب العميل، وتحقق من الحساب التجاري الحالي قبل إنشاء أي حساب جديد. التوثيق يبدأ من اليوم الأول — لا تنتظر اكتماله لتنفيذ بقية الخطوات، لكن لا تطلق لعملاء حقيقيين قبل فهم حدّ المراسلة.' },
+  { key: 'waba', fallbackTitle: 'حساب WhatsApp Business (WABA)', detail: 'أنشئ WABA داخل Portfolio العميل أو اختر الموجود إن كان صحيحاً. كل الأصول باسم العميل (المالك النهائي) — لا تُنشأ باسم المطوّر ثم تُنقل لاحقاً.' },
+  { key: 'dedicated_number', fallbackTitle: 'رقم مخصص للخدمة', detail: 'رقم تملكه وتستطيع استقبال رمز تحقق عليه، وليس رقمك الشخصي ولا رقماً مسجلاً حالياً في تطبيق واتساب أو WhatsApp Business. إن كان مسجلاً في التطبيق، احذفه من التطبيق أولاً أو اختر رقماً آخر — المشاركة بين التطبيق والـ API غير مدعومة في هذا الإعداد اليدوي. ثم أدخل Display Name مطابقاً للعلامة.' },
+  { key: 'app_token', fallbackTitle: 'التطبيق ورمز الوصول الدائم', detail: 'في Business Settings ← Users ← System Users: أنشئ System User بدور Admin، امنحه التطبيق وWABA بصلاحية Full Control، ثم Generate Token بانتهاء Never وبالصلاحيتين فقط whatsapp_business_messaging وwhatsapp_business_management.' },
+  { key: 'webhook', fallbackTitle: 'Webhook', detail: 'في التطبيق ← WhatsApp ← Configuration: أدخل Callback URL أدناه وVerify Token مطابقاً حرفياً لما في بيئة الاستضافة، ثم Verify and Save. اشترك في: messages وmessage_status وmessage_template_status_update وphone_number_quality_update وphone_number_name_update وaccount_update وbusiness_capability_update.' },
+  { key: 'test_message', fallbackTitle: 'رسالة الاختبار', detail: 'ابدأ برقم الاختبار وقالب hello_world في Meta، ثم أرسل رسالة اختبار من النموذج أدناه. لا تنتقل للتشغيل قبل نجاح: واردة في الإنبكس، ردّ يصل فعلاً للهاتف، وقالب خارج النافذة، ورفض النص الحر خارج النافذة.' },
+  { key: 'templates_approval', fallbackTitle: 'اعتماد القوالب لدى Meta', detail: 'القوالب العشرة Utility بالعربية. لا يُرسل أي قالب قبل اعتماده لدى Meta، ولا يُرسل قالب لأي شخص خارج علاقة الدعوة/العقد. راجع تبويب «القوالب» لحالتي كل قالب (المحلية وMeta).' },
+];
+const LIVE_WEBHOOK_EXAMPLE = 'https://pilot-system-z5vc.onrender.com/api/whatsapp/webhook';
 export function WhatsApp({ b, reload, me, sub }: { b: Bundle; reload: () => void; me: MeUser | null; sub?: 'connection' | 'templates' | 'settings' | 'webhook' }) {
-  const [steps, setSteps] = useState<ChecklistStep[]>([]);
   const [status, setStatus] = useState<WhatsAppStatus | null>(null);
   const [err, setErr] = useState('');
+  const [testMsg, setTestMsg] = useState('');
+  const [tokenMsg, setTokenMsg] = useState('');
+  const [testingToken, setTestingToken] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sendForm, setSendForm] = useState({ to: '', mode: 'text' as 'text' | 'template', body: '', template_name: '' });
+  const canEdit = hasAction(me, 'whatsapp', 'edit');
   useEffect(() => {
-    api.connectionChecklist().then(setSteps).catch(() => setSteps([]));
     api.whatsappStatus().then(setStatus).catch((e) => setErr((e as Error).message));
   }, []);
-  if (sub === 'templates') return <Templates b={b} reload={reload} canEdit={hasAction(me, 'whatsapp', 'edit')} />;
+  const refresh = () => { api.whatsappStatus().then(setStatus).catch((e) => setErr((e as Error).message)); reload(); };
+  if (sub === 'templates') return <Templates b={b} reload={reload} canEdit={canEdit} />;
   if (sub === 'settings') return <Card title="إعدادات واتساب" sub="أسماء متغيرات البيئة فقط — القيم تعيش في بيئة الخادم حصراً ولا تُكتب هنا ولا في أي ملف ولا في المحادثة.">
     <ul>
       <li><code>WHATSAPP_VERIFY_TOKEN</code> — رمز تحقق Webhook (يُطابق ما يُدخل في Meta).</li>
       <li><code>WHATSAPP_APP_SECRET</code> — سر التطبيق للتحقق من توقيع HMAC-SHA256.</li>
-      <li><code>WHATSAPP_ACCESS_TOKEN</code> — رمز الوصول للرسائل الصادرة.</li>
+      <li><code>WHATSAPP_ACCESS_TOKEN</code> — رمز الوصول الدائم (System User Token) للرسائل الصادرة.</li>
       <li><code>WHATSAPP_PHONE_NUMBER_ID</code> — معرّف الرقم المخصص للخدمة.</li>
       <li><code>WHATSAPP_BUSINESS_ACCOUNT_ID</code> — معرّف حساب WhatsApp Business.</li>
+      <li><code>WHATSAPP_API_VERSION</code> — إصدار Graph API (الافتراضي عند التنفيذ: v26.0).</li>
+      <li><code>APP_BASE_URL</code> — عنوان الموقع الحي، يُستخدم لبناء عنوان Webhook.</li>
       <li><code>JWT_SECRET</code> — سر توقيع رموز الدخول (8 ساعات).</li>
     </ul>
-    <p className="muted">الربط الفعلي يتم في حساب Meta باسم العميل، وبعد اعتماد القوالب العشرة، وقبل أي إرسال حقيقي.</p>
+    <p className="muted">تُضبط هذه المتغيرات في لوحة Render (Environment) ثم يُعاد النشر — المتغيرات لا تسري قبل إعادة النشر. لا يوجد في هذه الواجهة أي حقل لإدخال رمز أو سر، عمداً.</p>
   </Card>;
   if (sub === 'webhook') return <Card title="حالة Webhook" sub="حالة فقط — لا تُعرض أي قيمة سرية هنا أبداً.">
     <p>الخادم: {b.healthOk ? <Badge tone="ok">متصل</Badge> : <Badge tone="bad">غير متصل</Badge>}</p>
@@ -569,21 +648,114 @@ export function WhatsApp({ b, reload, me, sub }: { b: Bundle; reload: () => void
       <li>رمز التحقق مضبوط: {status.webhook_verify_configured ? 'نعم' : 'لا'}</li>
       <li>التحقق بتوقيع HMAC مفعّل: {status.webhook_hmac_configured ? 'نعم' : 'لا'}</li>
       <li>رمز الوصول مضبوط: {status.whatsapp_access_configured ? 'نعم' : 'لا'}</li>
-      <li>قوالب معتمدة: {status.templates_approved} من {status.templates_total}</li>
+      <li>رقم الهاتف مضبوط: {status.phone_number_configured === undefined ? 'غير معروف (الخادم القديم لا يرسل هذا الحقل)' : status.phone_number_configured ? 'نعم' : 'لا'}</li>
+      <li>حساب WABA مضبوط: {status.waba_configured === undefined ? 'غير معروف (الخادم القديم لا يرسل هذا الحقل)' : status.waba_configured ? 'نعم' : 'لا'}</li>
+      <li>إصدار API: {status.api_version || 'غير معروف (الخادم القديم لا يرسل هذا الحقل)'}</li>
+      <li>قوالب معتمدة محلياً: {status.templates_approved} من {status.templates_total}</li>
+      <li>قوالب معتمدة لدى Meta: {status.templates_meta_approved === undefined ? 'غير معروف (الخادم القديم لا يرسل هذا الحقل)' : `${status.templates_meta_approved} من ${status.templates_total}`}</li>
     </ul> : <p className="muted">{err ? 'تعذر جلب حالة Webhook: ' + err : 'جارٍ الجلب…'}</p>}
     <p className="muted">نقطة Webhook: <code>GET/POST /api/whatsapp/webhook</code> — التحقق GET يقارن رمز Meta، والوارد POST يتحقق من توقيع <code>x-hub-signature-256</code> عند ضبط السر.</p>
+    <p className="muted">عنوان Webhook الكامل (استخدم نطاقك الحي إن تغيّر عن Render): <code>{status?.app_base_url ? status.app_base_url.replace(/\/$/, '') + '/api/whatsapp/webhook' : LIVE_WEBHOOK_EXAMPLE}</code>{!status?.app_base_url && ' — هذا مثال بالنطاق الحي الحالي؛ إن كان نطاقك مختلفاً، استبدل النطاق فقط واحتفظ بالمسار.'}</p>
   </Card>;
-  return <Card title="الربط والتوصيل" sub="قناة واتساب: Meta Business + حساب WhatsApp Business + رقم موثّق + Webhook سليم — ثم اعتماد القوالب.">
-    <ol className="checklist">
-      <li><b>حساب Meta Business</b><p className="muted">التحقق من الحساب الحالي قبل إنشاء أي حساب جديد.</p></li>
-      <li><b>حساب WhatsApp Business ورقم موثّق مخصص</b><p className="muted">رقم مخصص لخدمة الوساطة، منفصل عن الرقم الشخصي.</p></li>
-      <li><b>Webhook</b><p className="muted">نقطة الاستقبال + رمز التحقق + سر التطبيق (انظر تبويب حالة Webhook).</p></li>
-      <li><b>اعتماد القوالب العشرة</b><p className="muted">قوالب Utility بالعربية؛ لا إرسال خارج نافذة 24 ساعة إلا بقالب معتمد.</p></li>
-    </ol>
-    <h3>قائمة الربط (10 خطوات من الخادم)</h3>
-    {steps.length === 0 ? <Empty text="تعذر جلب خطوات الربط من الخادم." /> :
-      <ol className="checklist">{steps.map((s) => <li key={s.step}><b>{s.step}. {s.title_ar}</b><p className="muted">{s.description_ar}</p></li>)}</ol>}
-  </Card>;
+  // --- Connection wizard (default sub) ---
+  // When the backend returns wizard_steps, those 7 steps (keys, titles,
+  // statuses) are rendered verbatim, in the backend's order — the UI never
+  // renames or reorders them. The fallback spec below is used only when the
+  // backend does not yet return wizard_steps.
+  const apiSteps = status?.wizard_steps || [];
+  const API_DETAIL: Record<string, string> = {
+    meta_business: WIZARD_SPEC[0].detail,
+    dedicated_number: WIZARD_SPEC[2].detail,
+    env_vars: 'اضبط المتغيرات في Render فقط (Environment ← Add Environment Variable ثم Redeploy): WHATSAPP_VERIFY_TOKEN وWHATSAPP_APP_SECRET وWHATSAPP_ACCESS_TOKEN وWHATSAPP_PHONE_NUMBER_ID وWHATSAPP_BUSINESS_ACCOUNT_ID وWHATSAPP_API_VERSION وAPP_BASE_URL. لا تلصق أي قيمة هنا — لا يوجد حقل رمز أو سر في هذه الواجهة عمداً.',
+    webhook: WIZARD_SPEC[4].detail,
+    meta_connection: 'يتحقق الخادم من الرمز الدائم لدى Meta بقراءة فقط — دون عرض الرمز أو حفظه هنا. إذا رُفض الرمز، يعيد المالك إنشاء System User Token ولصقه في بيئة الاستضافة فقط.',
+    templates: WIZARD_SPEC[6].detail,
+    test_message: WIZARD_SPEC[5].detail,
+  };
+  const steps = apiSteps.length
+    ? apiSteps.map((s) => ({ key: s.key, title: s.title_ar, status: s.status, detail: API_DETAIL[s.key] || 'خطوة ربط من الخادم — اتبع إرشادات Meta في حساب العميل لإكمالها.' }))
+    : WIZARD_SPEC.map((spec) => {
+        let derived: 'done' | 'pending' | 'blocked' = 'pending';
+        if (spec.key === 'app_token') derived = status?.whatsapp_access_configured ? 'done' : 'pending';
+        if (spec.key === 'webhook') derived = status && status.webhook_verify_configured && status.webhook_hmac_configured ? 'done' : 'pending';
+        if (spec.key === 'templates_approval') derived = status && status.templates_total > 0 && status.templates_meta_approved !== undefined && status.templates_meta_approved >= status.templates_total ? 'done' : 'pending';
+        if (spec.key === 'waba') derived = status?.waba_configured ? 'done' : 'pending';
+        if (spec.key === 'dedicated_number') derived = status?.phone_number_configured ? 'done' : 'pending';
+        return { key: spec.key, title: spec.fallbackTitle, status: derived, detail: spec.detail };
+      });
+  const doneCount = steps.filter((s) => s.status === 'done').length;
+  const blockedCount = steps.filter((s) => s.status === 'blocked').length;
+  const stepTone = (s: string) => s === 'done' ? 'ok' as const : s === 'blocked' ? 'bad' as const : 'warn' as const;
+  const stepAr = (s: string) => s === 'done' ? 'مكتمل' : s === 'blocked' ? 'متعذّر' : 'بانتظار';
+  const webhookUrl = status?.app_base_url ? status.app_base_url.replace(/\/$/, '') + '/api/whatsapp/webhook' : LIVE_WEBHOOK_EXAMPLE;
+  async function testToken() {
+    setTestingToken(true); setTokenMsg('');
+    try { const r = await api.whatsappTestToken();
+      if (r.meta_ok) setTokenMsg(`نتيجة اختبار الرمز: ناجح — الرمز مضبوط ومقبول لدى Meta.${r.dry_run ? ' (وضع تجريبي).' : ''} لم يُعرض الرمز ولم يُحفظ في أي مكان.`);
+      else setTokenMsg(`نتيجة اختبار الرمز: ${r.dry_run ? 'وضع تجريبي — Meta غير موصول، لم يُجرَ اختبار حقيقي. ' : 'فشل — '}${!r.configured ? 'الرمز غير مضبوط في بيئة الاستضافة. اضبط WHATSAPP_ACCESS_TOKEN في Render ثم أعد النشر.' : r.error || 'الرمز مرفوض من Meta — على المالك إعادة إنشاء الرمز الدائم (System User Token) وإعادة لصقه في بيئة الاستضافة فقط.'} لم يُعرض أي رمز.`);
+    } catch (err) { setTokenMsg('خطأ في اختبار الرمز: ' + (err as Error).message + ' — إذا كان الخادم لا يوفّر هذا الـ endpoint بعد، فالواجهة جاهزة والخادم ما زال قيد التنفيذ.'); }
+    finally { setTestingToken(false); }
+  }
+  async function sendTest(e: React.FormEvent) {
+    e.preventDefault(); setSending(true); setTestMsg('');
+    if (!sendForm.to.trim()) { setTestMsg('أدخل رقم المستقبل بصيغة دولية.'); setSending(false); return; }
+    try {
+      const payload = sendForm.mode === 'template'
+        ? { to: sendForm.to.trim(), template_name: sendForm.template_name, language: 'ar' }
+        : { to: sendForm.to.trim(), body: sendForm.body.trim() };
+      if (sendForm.mode === 'text' && !sendForm.body.trim()) { setTestMsg('أدخل نص الرسالة أو اختر «قالب».'); setSending(false); return; }
+      if (sendForm.mode === 'template' && !sendForm.template_name) { setTestMsg('اختر قالباً.'); setSending(false); return; }
+      const r = await api.whatsappSend(payload);
+      if (r.ok) setTestMsg(`نتيجة الإرسال: ${r.dry_run ? 'لم يُرسل إلى واتساب — وضع تجريبي لأن Meta غير موصول. (تمت المحاكاة محلياً فقط.)' : `أُرسل إلى واتساب — معرّف الرسالة: ${r.wamid || r.message_id || '—'}.`}`);
+      else if (r.error === 'outside_24h_window_use_template') setTestMsg('لم يُرسل: خارج نافذة 24 ساعة — لا يمكن إرسال نص حر الآن. أرسل قالباً معتمداً لدى Meta بدل النص الحر (اختر «قالب» أعلاه)، أو انتظر رسالة جديدة من العميل تفتح نافذة جديدة.');
+      else if (r.error === 'template_not_approved') setTestMsg('لم يُرسل: القالب غير معتمد محلياً لدى الخادم — الخادم يرفض إرسال قالب حالته المحلية ليست «معتمد». راجع حالتي القالب في تبويب «القوالب» (المحلية وMeta) قبل إعادة المحاولة.');
+      else if (r.error === 'template_not_found') setTestMsg('لم يُرسل: القالب غير موجود في الخادم — اختر قالباً من القائمة.');
+      else setTestMsg(`لم يُرسل: ${r.error || 'خطأ غير معروف'}.`);
+    } catch (err) { setTestMsg('خطأ في الإرسال: ' + (err as Error).message + ' — إذا كان الخادم لا يوفّر هذا الـ endpoint بعد، فالواجهة جاهزة والخادم ما زال قيد التنفيذ.'); }
+    finally { setSending(false); }
+  }
+  return <>
+    <Card title={`معالج ربط واتساب — ${steps.length} خطوات`} sub={`مكتمل: ${doneCount} من ${steps.length}${blockedCount ? ` — متعذّر: ${blockedCount}` : ''} — الحالة من الخادم (GET /api/whatsapp/status)، وليست من المتصفح. لا يوجد هنا أي حقل لإدخال رمز أو سر.`}>
+      {!status && <p className="muted">{err ? 'تعذر جلب حالة الربط: ' + err : 'جارٍ جلب حالة الربط من الخادم…'}</p>}
+      {status && !status.wizard_steps && <p className="local-note">الخادم الحالي لا يرسل wizard_steps بعد — الخطوات أدناه مشتقة من الحقول القديمة فقط (بانتظار ما لم يثبته الخادم)، وستُعرض حالة الخادم الحقيقية فور توفر الـ endpoint الجديد.</p>}
+      <ol className="wizard">
+        {steps.map((s, i) => <li key={s.key} className="wizard-step">
+          <div className="wizard-head"><b>{i + 1}. {s.title}</b><Badge tone={stepTone(s.status)}>{stepAr(s.status)}</Badge></div>
+          <p className="muted">{s.detail}</p>
+          {(s.key === 'app_token' || s.key === 'meta_connection') && <>
+            <p className="local-note">⚠️ اضبط WHATSAPP_ACCESS_TOKEN (وأي متغير آخر) في Render فقط: Environment ← Add Environment Variable ثم Redeploy. لا تلصق أي رمز في هذا النموذج — لا يوجد حقل رمز هنا عمداً، ولا يُعرض الرمز أبداً.</p>
+            {canEdit && <div className="btn-row"><button className="btn" disabled={testingToken} onClick={testToken}>{testingToken ? 'جارٍ الاختبار…' : 'اختبار الرمز (Test Token)'}</button></div>}
+            {!canEdit && <p className="muted">اختبار الرمز يتطلب صلاحية تعديل واتساب (whatsapp:edit).</p>}
+            {tokenMsg && <p className="msg">{tokenMsg}</p>}
+          </>}
+          {s.key === 'env_vars' && <p className="local-note">⚠️ القيم تُضبط في Render فقط ثم يُعاد النشر — لا يوجد حقل لإدخال أي قيمة هنا، ولا تُعرض أي قيمة أبداً. بعد ضبطها، اضغط «اختبار الرمز» في خطوة اختبار اتصال Meta.</p>}
+          {s.key === 'webhook' && <>
+            <p>عنوان Webhook الكامل: <code>{webhookUrl}</code></p>
+            {!status?.app_base_url && <p className="muted">الخادم لا يرسل APP_BASE_URL بعد — العنوان أعلاه مثال بالنطاق الحي الحالي (https://pilot-system-z5vc.onrender.com). إن كان نطاقك الحي مختلفاً، استخدم نطاقك أنت واحتفظ بالمسار /api/whatsapp/webhook.</p>}
+            <ul>
+              <li>رمز التحقق (Verify Token) مضبوط: {status ? (status.webhook_verify_configured ? 'نعم' : 'لا') : 'جارٍ الجلب…'}</li>
+              <li>توقيع HMAC (App Secret) مضبوط: {status ? (status.webhook_hmac_configured ? 'نعم' : 'لا') : 'جارٍ الجلب…'}</li>
+            </ul>
+            <p className="muted">تُعرض هنا حالة الضبط فقط (نعم/لا) — لا تُعرض أي قيمة أبداً.</p>
+          </>}
+          {s.key === 'test_message' && <>
+            {canEdit ? <form className="grid2" onSubmit={sendTest}>
+              <Field label="رقم المستقبل (صيغة دولية، بدون + وبدون مسافات)"><input required value={sendForm.to} onChange={(e) => setSendForm({ ...sendForm, to: e.target.value })} placeholder="مثال: 9677xxxxxxxx" /></Field>
+              <Field label="نوع الرسالة"><select value={sendForm.mode} onChange={(e) => setSendForm({ ...sendForm, mode: e.target.value as 'text' | 'template' })}><option value="text">نص حر (داخل نافذة 24 ساعة فقط)</option><option value="template">قالب معتمد (خارج النافذة أيضاً)</option></select></Field>
+              {sendForm.mode === 'text'
+                ? <div style={{ gridColumn: '1 / -1' }}><Field label="نص الرسالة"><textarea rows={3} value={sendForm.body} onChange={(e) => setSendForm({ ...sendForm, body: e.target.value })} /></Field></div>
+                : <Field label="القالب"><select value={sendForm.template_name} onChange={(e) => setSendForm({ ...sendForm, template_name: e.target.value })}><option value="">— اختر قالباً —</option>{b.templates.map((t) => <option key={t.id} value={t.name}>{t.name} ({TEMPLATE_AR[t.name] || t.name}) — حالة Meta: {t.meta_status || 'غير معروفة'}، حالة محلية: {t.approval_status}</option>)}</select></Field>}
+              <button className="btn" type="submit" disabled={sending}>{sending ? 'جارٍ الإرسال…' : 'إرسال رسالة اختبار'}</button>
+            </form> : <p className="muted">إرسال رسالة الاختبار يتطلب صلاحية تعديل واتساب (whatsapp:edit).</p>}
+            {testMsg && <p className="msg">{testMsg}</p>}
+          </>}
+          {(s.key === 'templates_approval' || s.key === 'templates') && <p className="muted">قوالب معتمدة لدى Meta: {status?.templates_meta_approved === undefined ? 'غير معروف (الخادم القديم لا يرسل هذا الحقل)' : `${status.templates_meta_approved} من ${status.templates_total}`} — التفاصيل في تبويب «القوالب».</p>}
+        </li>)}
+      </ol>
+      <div className="btn-row"><button className="btn ghost" onClick={refresh}>تحديث الحالة من الخادم</button></div>
+      <p className="muted">قواعد ثابتة: لا محفظة داخلية، لا متجر، لا إجراء مالي آلي، واجهة العميل واتساب فقط، رقم مخصص للخدمة، بدون وسيط (BSP)، وكل الحسابات باسم العميل.</p>
+    </Card>
+  </>;
 }
 
 /* ---------------- System settings ---------------- */

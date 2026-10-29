@@ -5,7 +5,14 @@
 // - No automated money step: release/refund/confirm/settle are human-only.
 // - Audit log is append-only: the API never updates or deletes it
 //   (GET /api/audit only; POST/PUT/PATCH/DELETE on it return 404).
-// - WhatsApp webhook verifies HMAC-SHA256 when WHATSAPP_APP_SECRET is set.
+// - WhatsApp webhook verifies HMAC-SHA256 over the RAW request body with
+//   WHATSAPP_APP_SECRET (constant-time compare); a missing/malformed
+//   signature is rejected, and invalid JSON is never stored as a message.
+// - Meta WhatsApp Cloud API client (Node https/http built-ins only):
+//   base https://graph.facebook.com, version from WHATSAPP_API_VERSION
+//   (default v26.0), token/phone/WABA IDs from environment only, never
+//   returned in any response and never written to any file. A mock base
+//   URL (META_MOCK_BASE_URL) exists for tests only, never for production.
 // - Contract file uploads store METADATA ONLY — never file bytes/content.
 // - Auth: every /api route requires a Bearer token, except /health,
 //   POST /api/auth/login and the WhatsApp webhook (GET/POST). Tokens are
@@ -22,7 +29,8 @@ const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'data.json');
 const FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
 const FRONTEND_FALLBACK = path.join(__dirname, '..', '..', 'frontend');
-const MAX_BODY_BYTES = 1024 * 1024; // 1 MB
+const MAX_BODY_BYTES = 1024 * 1024; // 1 MB (all routes except the webhook)
+const WEBHOOK_MAX_BODY_BYTES = 5 * 1024 * 1024; // 5 MB: Meta webhook only
 
 const STATES = ['draft','issued','accepted','payment_pending','payment_confirmed','preparing','delivered','completed','disputed','refund_pending','refunded','cancelled'];
 const TRANSITIONS = {
@@ -228,6 +236,142 @@ function readBody(req) {
     req.on('error', () => resolve({}));
   });
 }
+// ---- Raw-body reader (webhook only) ----
+// Returns { raw: Buffer, tooLarge: bool }. The webhook MUST verify the
+// HMAC over these exact bytes: re-serialising parsed JSON changes key
+// order/spacing and breaks genuine Meta signatures.
+function readRawBody(req, maxBytes) {
+  return new Promise((resolve) => {
+    const chunks = []; let size = 0; let tooLarge = false;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > maxBytes) { tooLarge = true; return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve({ raw: Buffer.concat(chunks), tooLarge }));
+    req.on('error', () => resolve({ raw: Buffer.concat(chunks), tooLarge: true }));
+  });
+}
+// Constant-time signature comparison (same-length buffers only; a
+// length mismatch is itself a rejection, and lengths here are fixed).
+function safeEqualStr(a, b) {
+  const ba = Buffer.from(String(a)), bb = Buffer.from(String(b));
+  if (ba.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ba, bb);
+}
+
+// ---- Meta WhatsApp Cloud API client (built-ins only) ----
+// Env names only; values are never logged, returned, or persisted.
+function metaConfig() {
+  const mock = process.env.META_MOCK_BASE_URL || '';
+  const version = process.env.WHATSAPP_API_VERSION || 'v26.0';
+  const token = process.env.WHATSAPP_ACCESS_TOKEN || '';
+  const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID || '';
+  const wabaId = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || '';
+  return {
+    base: (mock || 'https://graph.facebook.com').replace(/\/+$/, ''),
+    version, token, phoneId, wabaId, mock: !!mock,
+    configured: !!(token && phoneId && wabaId),
+  };
+}
+// Sanitised Meta error: code + message only, capped, never a token.
+function metaErrorInfo(parsed) {
+  const err = parsed && parsed.error;
+  if (err && typeof err === 'object') {
+    return { meta_error_code: err.code !== undefined ? err.code : null, error: String(err.message || 'meta request failed').slice(0, 500) };
+  }
+  return { error: 'meta request failed' };
+}
+function metaRequest(method, path, bodyObj) {
+  const cfg = metaConfig();
+  return new Promise((resolve) => {
+    let url;
+    try { url = new URL(`${cfg.base}/${cfg.version}${path}`); }
+    catch { return resolve({ ok: false, ...metaErrorInfo(null) }); }
+    const lib = url.protocol === 'http:' ? require('http') : require('https');
+    const payload = bodyObj ? JSON.stringify(bodyObj) : null;
+    const headers = { 'Content-Type': 'application/json' };
+    if (cfg.token) headers.Authorization = 'Bearer ' + cfg.token;
+    const req = lib.request(url, { method, headers, timeout: 10000 }, (resp) => {
+      let data = '';
+      resp.on('data', (c) => { data += c; });
+      resp.on('end', () => {
+        let parsed = null;
+        try { parsed = data ? JSON.parse(data) : null; } catch {}
+        if (resp.statusCode >= 200 && resp.statusCode < 300) resolve({ ok: true, status: resp.statusCode, data: parsed });
+        else resolve({ ok: false, status: resp.statusCode, ...metaErrorInfo(parsed) });
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve({ ok: false, error: 'meta request timed out' }); });
+    req.on('error', () => resolve({ ok: false, error: 'meta request failed' }));
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+// ---- WhatsApp phone / conversation helpers ----
+// Normalise for matching: strip spaces, dashes, parentheses; keep '+'.
+function normPhone(p) { return String(p || '').replace(/[\s\-()]/g, ''); }
+function phoneKey(p) { return normPhone(p).replace(/^\+/, ''); }
+// Find (or, for sending, create) the conversation for a customer phone:
+// prefer a contract conversation whose buyer/seller phone matches, else
+// a GENERAL conversation (contract_id null, party 'general') for that
+// phone. NEVER creates a contract.
+function conversationForPhone(phone, createGeneral) {
+  const key = phoneKey(phone);
+  for (const c of db.contracts) {
+    if (phoneKey(c.buyer_phone) === key) {
+      const conv = db.conversations.find((x) => x.contract_id === c.id && x.party === 'buyer');
+      if (conv) return conv;
+    }
+    if (phoneKey(c.seller_phone) === key) {
+      const conv = db.conversations.find((x) => x.contract_id === c.id && x.party === 'seller');
+      if (conv) return conv;
+    }
+  }
+  const general = db.conversations.find((x) => x.contract_id === null && x.party === 'general' && phoneKey(x.phone) === key);
+  if (general) return general;
+  if (!createGeneral) return null;
+  const conv = { id: nextId(), contract_id: null, party: 'general', phone: normPhone(phone), status: 'new', unread_count: 0, assigned_to: null, last_inbound_at: null };
+  db.conversations.push(conv);
+  return conv;
+}
+// Most recent inbound timestamp (ISO) for a phone across its conversations.
+function lastInboundAtForPhone(phone) {
+  const key = phoneKey(phone);
+  let latest = null;
+  for (const conv of db.conversations) {
+    let matches = false;
+    if (conv.contract_id !== null && conv.contract_id !== undefined) {
+      const c = db.contracts.find((x) => x.id === conv.contract_id);
+      if (c && ((conv.party === 'buyer' && phoneKey(c.buyer_phone) === key) || (conv.party === 'seller' && phoneKey(c.seller_phone) === key))) matches = true;
+    } else if (conv.party === 'general' && phoneKey(conv.phone) === key) matches = true;
+    if (matches && conv.last_inbound_at && (!latest || conv.last_inbound_at > latest)) latest = conv.last_inbound_at;
+  }
+  return latest;
+}
+function within24h(iso) {
+  if (!iso) return false;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) && (Date.now() - t) < 24 * 3600 * 1000;
+}
+// Status ranking: never let an older status overwrite a newer one,
+// except 'failed', which always applies.
+const META_STATUS_RANK = { sent: 1, delivered: 2, read: 3, failed: 4 };
+function mapMetaStatus(s) {
+  const v = String(s || '').toLowerCase();
+  if (['sent', 'delivered', 'read', 'failed'].includes(v)) return v;
+  return null;
+}
+function mapMetaTemplateStatus(s) {
+  const v = String(s || '').toUpperCase();
+  if (v === 'APPROVED') return 'approved';
+  if (v === 'PENDING') return 'pending';
+  if (v === 'REJECTED') return 'rejected';
+  if (v === 'PAUSED') return 'paused';
+  if (v === 'DISABLED') return 'disabled';
+  return null;
+}
 function contractCode(n) { return 'PS-' + String(1000 + n); }
 function hasBannedStep(steps) {
   return (steps || []).some((s) => BANNED_STEP_TYPES.includes(s.step_type || s.action));
@@ -295,11 +439,14 @@ function seedTemplates() {
   let changed = false;
   if (!db.templates.length) {
     const names = ['contract_created','invite_accept','contract_accepted','payment_request','payment_confirmed_fi','preparing','delivery_confirmed','transaction_closed','dispute_opened','handover_support'];
-    names.forEach((n) => db.templates.push({ id: nextId(), name: n, label_ar: TEMPLATE_LABELS_AR[n] || n, language: 'ar', category: 'UTILITY', approval_status: 'pending' }));
+    names.forEach((n) => db.templates.push({ id: nextId(), name: n, label_ar: TEMPLATE_LABELS_AR[n] || n, language: 'ar', category: 'UTILITY', approval_status: 'pending', meta_status: 'not_submitted' }));
     changed = true;
   } else {
     for (const t of db.templates) {
       if (!t.label_ar && TEMPLATE_LABELS_AR[t.name]) { t.label_ar = TEMPLATE_LABELS_AR[t.name]; changed = true; }
+      // meta_status is Meta's view of the template; approval_status stays
+      // the local (manual) field. Never overwrite one with the other.
+      if (!t.meta_status) { t.meta_status = 'not_submitted'; changed = true; }
     }
   }
   if (changed) save();
@@ -349,25 +496,99 @@ const server = http.createServer(async (req, res) => {
   }
   if (p === '/health') return send(res, 200, { ok: true, service: 'pilot-system', states: STATES }, p);
 
+  // WhatsApp webhook: POST inbound (public by design) — handled BEFORE
+  // any generic body parsing so the HMAC is verified over raw bytes.
+  if (p === '/api/whatsapp/webhook' && req.method === 'POST') {
+    const secret = process.env.WHATSAPP_APP_SECRET || '';
+    // When no app secret is configured, unsigned traffic is refused
+    // outright rather than accepted as if it were a customer message.
+    if (!secret) return send(res, 401, { error: 'webhook signature not configured' }, p);
+    const { raw, tooLarge } = await readRawBody(req, WEBHOOK_MAX_BODY_BYTES);
+    if (tooLarge) return send(res, 413, { error: 'webhook body too large (max 5 MB)' }, p);
+    const sig = req.headers['x-hub-signature-256'];
+    if (!sig || typeof sig !== 'string' || !sig.startsWith('sha256=')) return send(res, 401, { error: 'missing or malformed signature' }, p);
+    const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(raw).digest('hex');
+    if (!safeEqualStr(sig, expected)) return send(res, 401, { error: 'bad signature' }, p);
+    let envelope;
+    try { envelope = JSON.parse(raw.toString('utf8')); } catch { return send(res, 400, { error: 'invalid JSON' }, p); }
+    // Envelope validation: invalid envelopes are rejected, never stored.
+    if (!envelope || envelope.object !== 'whatsapp_business_account' || !Array.isArray(envelope.entry)) {
+      return send(res, 400, { error: 'invalid webhook envelope' }, p);
+    }
+    let inCount = 0, statusCount = 0, templateCount = 0;
+    for (const entry of envelope.entry) {
+      if (!entry || !Array.isArray(entry.changes)) continue;
+      for (const change of entry.changes) {
+        if (!change) continue;
+        try {
+          const value = change.value || {};
+          // Template status updates (field-based).
+          if (change.field === 'message_template_status_update' && value.message_template_name) {
+            const mapped = mapMetaTemplateStatus(value.event || value.status);
+            const tpl = db.templates.find((t) => t.name === value.message_template_name);
+            if (tpl && mapped) {
+              tpl.meta_status = mapped; templateCount++;
+              audit('whatsapp-webhook', 'template', tpl.id, 'whatsapp_template_status', { meta_status: mapped, event: value.event || null });
+            }
+            continue;
+          }
+          // Inbound messages.
+          if (Array.isArray(value.messages)) {
+            for (const m of value.messages) {
+              if (!m || !m.id || !m.from) continue;
+              if (db.messages.some((x) => x.wamid === m.id)) continue; // dedup on wamid
+              const conv = conversationForPhone(m.from, true);
+              let text = null, mediaType = null;
+              if (m.type === 'text') text = (m.text && m.text.body) || null;
+              else if (['image', 'video', 'audio', 'document'].includes(m.type)) {
+                mediaType = m.type;
+                text = (m[m.type] && m[m.type].caption) || `[${m.type}]`;
+              } else if (m.type === 'interactive') {
+                const r = m.interactive || {};
+                text = (r.button_reply && r.button_reply.title) || (r.list_reply && r.list_reply.title) || '[interactive]';
+              } else if (m.type === 'sticker') { mediaType = 'sticker'; text = '[sticker]'; }
+              else continue; // unknown message type: ignore safely
+              const ts = m.timestamp ? new Date(Number(m.timestamp) * 1000).toISOString() : new Date().toISOString();
+              const msg = { id: nextId(), conversation_id: conv.id, direction: 'in', sender_phone: normPhone(m.from), body: text, media_type: mediaType, wamid: m.id, meta_status: null, created_at: ts };
+              db.messages.push(msg);
+              conv.unread_count = (conv.unread_count || 0) + 1;
+              conv.last_inbound_at = ts;
+              inCount++;
+              audit('whatsapp-webhook', 'message', msg.id, 'whatsapp_inbound', { conversation_id: conv.id, wamid: m.id, type: m.type });
+            }
+          }
+          // Delivery/read/failed statuses for outbound messages.
+          if (Array.isArray(value.statuses)) {
+            for (const s of value.statuses) {
+              if (!s || !s.id) continue;
+              const mapped = mapMetaStatus(s.status);
+              if (!mapped) continue;
+              const out = db.messages.find((x) => x.wamid === s.id && x.direction === 'out');
+              if (!out) continue;
+              const curRank = META_STATUS_RANK[out.meta_status] || 0;
+              if (mapped === 'failed' || META_STATUS_RANK[mapped] >= curRank) {
+                out.meta_status = mapped; statusCount++;
+                audit('whatsapp-webhook', 'message', out.id, 'whatsapp_status', { wamid: s.id, meta_status: mapped });
+              }
+            }
+          }
+          // Other value types (phone_number_quality_update, etc.): ignored safely.
+        } catch { continue; } // one malformed change never fails the whole webhook
+      }
+    }
+    save();
+    return send(res, 200, { ok: true, messages: inCount, statuses: statusCount, templates: templateCount }, p);
+  }
+
   const hasBody = req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH';
   const body = hasBody ? await readBody(req) : {};
   if (body && body.__tooLarge) return send(res, 413, { error: 'request body too large (max 1 MB)' }, p);
 
-  // WhatsApp webhook: GET verification, POST inbound (public by design).
+  // WhatsApp webhook: GET verification (unchanged handshake).
   if (p === '/api/whatsapp/webhook' && req.method === 'GET') {
     const mode = url.searchParams.get('hub.mode'), token = url.searchParams.get('hub.verify_token'), challenge = url.searchParams.get('hub.challenge');
     if (mode === 'subscribe' && token && token === process.env.WHATSAPP_VERIFY_TOKEN) { res.writeHead(200, securityHeaders(p)); return res.end(challenge); }
     return send(res, 403, { error: 'webhook verification failed' }, p);
-  }
-  if (p === '/api/whatsapp/webhook' && req.method === 'POST') {
-    const sig = req.headers['x-hub-signature-256'];
-    if (process.env.WHATSAPP_APP_SECRET && sig) {
-      const raw = JSON.stringify(body);
-      const expected = 'sha256=' + crypto.createHmac('sha256', process.env.WHATSAPP_APP_SECRET).update(raw).digest('hex');
-      if (sig !== expected) return send(res, 401, { error: 'bad signature' }, p);
-    }
-    const msg = { id: nextId(), conversation_id: null, direction: 'in', body: JSON.stringify(body).slice(0, 500), created_at: new Date().toISOString() };
-    db.messages.push(msg); audit('whatsapp-webhook', 'message', msg.id, 'inbound_received'); return send(res, 200, { ok: true, message_id: msg.id }, p);
   }
 
   // ---- Auth: login is public; every other /api route needs a token ----
@@ -410,14 +631,167 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/whatsapp/status' && req.method === 'GET') {
       if (!can(user, 'whatsapp', 'view')) return forbidden();
+      const cfg = metaConfig();
+      const verify = !!process.env.WHATSAPP_VERIFY_TOKEN;
+      const hmac = !!process.env.WHATSAPP_APP_SECRET;
+      const metaConfigured = cfg.configured;
+      // Wizard steps: server-computed, booleans only, no secret values.
+      // 'blocked' = cannot proceed until Meta is configured at all.
+      const wizardSteps = [
+        { key: 'meta_business', title_ar: 'حساب Meta Business', status: cfg.wabaId ? 'done' : 'pending' },
+        { key: 'dedicated_number', title_ar: 'رقم مخصص للخدمة', status: cfg.phoneId ? 'done' : 'pending' },
+        { key: 'env_vars', title_ar: 'متغيرات البيئة', status: (verify && hmac && metaConfigured) ? 'done' : 'pending' },
+        { key: 'webhook', title_ar: 'تحقق Webhook', status: (verify && hmac) ? 'done' : 'pending' },
+        { key: 'meta_connection', title_ar: 'اختبار اتصال Meta', status: metaConfigured ? 'pending' : 'blocked' },
+        { key: 'templates', title_ar: 'اعتماد القوالب لدى Meta', status: db.templates.some((t) => t.meta_status === 'approved') ? 'done' : (metaConfigured ? 'pending' : 'blocked') },
+        { key: 'test_message', title_ar: 'رسالة اختبار', status: metaConfigured ? 'pending' : 'blocked' },
+      ];
       return send(res, 200, {
-        health: true,
-        webhook_verify_configured: !!process.env.WHATSAPP_VERIFY_TOKEN,
-        webhook_hmac_configured: !!process.env.WHATSAPP_APP_SECRET,
-        whatsapp_access_configured: !!process.env.WHATSAPP_ACCESS_TOKEN,
+        // health is now computed (Meta fully configured), not hardcoded.
+        health: metaConfigured,
+        webhook_verify_configured: verify,
+        webhook_hmac_configured: hmac,
+        whatsapp_access_configured: !!cfg.token,
+        phone_number_configured: !!cfg.phoneId,
+        waba_configured: !!cfg.wabaId,
+        api_version: cfg.version,
+        meta_configured: metaConfigured,
         templates_total: db.templates.length,
         templates_approved: db.templates.filter((t) => t.approval_status === 'approved').length,
+        templates_meta_approved: db.templates.filter((t) => t.meta_status === 'approved').length,
+        wizard_steps: wizardSteps,
       }, p);
+    }
+
+    // ---- Meta WhatsApp: test-token / send / templates (whatsapp:edit) ----
+    // All Meta actions are audited. No token value is ever returned.
+    if (p === '/api/whatsapp/test-token' && req.method === 'POST') {
+      if (!can(user, 'whatsapp', 'edit')) return forbidden();
+      const cfg = metaConfig();
+      if (!cfg.configured) {
+        audit(actor, 'whatsapp', 0, 'whatsapp_test_token_dry_run');
+        return send(res, 200, { ok: true, configured: false, meta_ok: false, dry_run: true }, p);
+      }
+      const r = await metaRequest('GET', '/me', null);
+      if (r.ok) {
+        audit(actor, 'whatsapp', 0, 'whatsapp_test_token', { meta_ok: true });
+        return send(res, 200, { ok: true, configured: true, meta_ok: true, dry_run: false }, p);
+      }
+      audit(actor, 'whatsapp', 0, 'whatsapp_test_token_failed', { meta_error_code: r.meta_error_code || null });
+      return send(res, 200, { ok: false, configured: true, meta_ok: false, dry_run: false, meta_error_code: r.meta_error_code || null, error: r.error || 'meta request failed' }, p);
+    }
+    if (p === '/api/whatsapp/send' && req.method === 'POST') {
+      if (!can(user, 'whatsapp', 'edit')) return forbidden();
+      if (db.killSwitch) return send(res, 400, { error: 'kill_switch_on — الإرسال موقوف بمفتاح الإيقاف' }, p);
+      if (!body.to) return send(res, 400, { error: 'to is required' }, p);
+      const toNorm = normPhone(body.to);
+      const toMeta = phoneKey(body.to); // Meta wants international format, no '+'
+      const isTemplate = !!body.template_name;
+      let metaPayload = null;
+      if (isTemplate) {
+        const tpl = db.templates.find((t) => t.name === body.template_name);
+        if (!tpl) return send(res, 400, { error: 'template_not_found' }, p);
+        if (tpl.approval_status !== 'approved') return send(res, 400, { error: 'template_not_approved' }, p);
+        const components = [];
+        if (Array.isArray(body.parameters) && body.parameters.length) {
+          components.push({ type: 'body', parameters: body.parameters.map((v) => ({ type: 'text', text: String(v) })) });
+        }
+        metaPayload = { messaging_product: 'whatsapp', to: toMeta, type: 'template', template: { name: tpl.name, language: { code: body.language || tpl.language || 'ar' }, ...(components.length ? { components } : {}) } };
+      } else {
+        // Free-form (text/media/buttons/list) requires an open 24h window.
+        if (!within24h(lastInboundAtForPhone(body.to))) return send(res, 400, { error: 'outside_24h_window_use_template' }, p);
+        if (body.buttons !== undefined && (!Array.isArray(body.buttons) || body.buttons.length > 3)) return send(res, 400, { error: 'buttons must be an array of at most 3' }, p);
+        if (body.list !== undefined) {
+          const rows = (body.list.sections || []).reduce((n, s) => n + ((s.rows || []).length), 0);
+          if (rows > 10) return send(res, 400, { error: 'list must have at most 10 rows' }, p);
+        }
+        const kind = body.type || (body.media ? body.media.type : null) || 'text';
+        if (!['text', 'image', 'video', 'audio', 'document', 'buttons', 'list'].includes(kind)) return send(res, 400, { error: 'unsupported message type' }, p);
+        if (kind === 'text' && !body.body) return send(res, 400, { error: 'body is required for a text message' }, p);
+        if (kind === 'buttons') {
+          metaPayload = { messaging_product: 'whatsapp', to: toMeta, type: 'interactive', interactive: { type: 'button', body: { text: body.body || '' }, action: { buttons: (body.buttons || []).map((b) => ({ type: 'reply', reply: { id: b.id || b.title, title: b.title } })) } } };
+        } else if (kind === 'list') {
+          metaPayload = { messaging_product: 'whatsapp', to: toMeta, type: 'interactive', interactive: { type: 'list', body: { text: body.body || '' }, action: body.list } };
+        } else if (kind === 'text') {
+          metaPayload = { messaging_product: 'whatsapp', to: toMeta, type: 'text', text: { body: body.body } };
+        } else {
+          const media = body.media || {};
+          if (!media.link && !media.id) return send(res, 400, { error: 'media.link is required for a media message' }, p);
+          metaPayload = { messaging_product: 'whatsapp', to: toMeta, type: kind, [kind]: { ...(media.link ? { link: media.link } : { id: media.id }), ...(body.body ? { caption: body.body } : {}) } };
+        }
+      }
+      const cfg = metaConfig();
+      const conv = conversationForPhone(body.to, true);
+      if (!cfg.configured) {
+        const m = { id: nextId(), conversation_id: conv.id, direction: 'out', sender_phone: null, to_phone: toNorm, body: body.body || null, template_name: body.template_name || null, media_type: (body.media && body.media.type) || null, wamid: null, meta_status: null, dry_run: true, created_at: new Date().toISOString() };
+        db.messages.push(m); audit(actor, 'message', m.id, 'whatsapp_send_dry_run', { conversation_id: conv.id, template_name: m.template_name });
+        return send(res, 200, { ok: true, dry_run: true, configured: false, message: m }, p);
+      }
+      const r = await metaRequest('POST', `/${cfg.phoneId}/messages`, metaPayload);
+      if (!r.ok) {
+        audit(actor, 'whatsapp', 0, 'whatsapp_send_failed', { to_phone: toNorm, meta_error_code: r.meta_error_code || null });
+        return send(res, 502, { ok: false, dry_run: false, meta_error_code: r.meta_error_code || null, error: r.error || 'meta request failed' }, p);
+      }
+      const wamid = r.data && r.data.messages && r.data.messages[0] ? r.data.messages[0].id : null;
+      const m = { id: nextId(), conversation_id: conv.id, direction: 'out', sender_phone: null, to_phone: toNorm, body: body.body || null, template_name: body.template_name || null, media_type: (body.media && body.media.type) || null, wamid, meta_status: 'sent', dry_run: false, created_at: new Date().toISOString() };
+      db.messages.push(m); audit(actor, 'message', m.id, 'whatsapp_sent', { conversation_id: conv.id, wamid, template_name: m.template_name });
+      return send(res, 200, { ok: true, dry_run: false, configured: true, wamid, message: m }, p);
+    }
+    if (p === '/api/whatsapp/templates' && req.method === 'POST') {
+      if (!can(user, 'whatsapp', 'edit')) return forbidden();
+      if (!body.name || !/^[a-z0-9_]+$/.test(String(body.name))) return send(res, 400, { error: 'name is required (lowercase letters, digits, underscores only)' }, p);
+      if (body.category !== undefined && body.category !== 'UTILITY') return send(res, 400, { error: 'category must be UTILITY only — Marketing templates are not allowed' }, p);
+      if (body.language !== undefined && body.language !== 'ar') return send(res, 400, { error: 'language must be ar' }, p);
+      if (!body.body || !String(body.body).trim()) return send(res, 400, { error: 'body is required' }, p);
+      if (db.templates.some((t) => t.name === body.name)) return send(res, 400, { error: 'template name already exists' }, p);
+      const t = { id: nextId(), name: body.name, label_ar: body.label_ar || body.name, language: 'ar', category: 'UTILITY', body: String(body.body), buttons: Array.isArray(body.buttons) ? body.buttons : [], approval_status: 'pending', meta_status: 'not_submitted', meta_template_id: null, created_at: new Date().toISOString() };
+      db.templates.push(t); audit(actor, 'template', t.id, 'whatsapp_template_created', { name: t.name }); return send(res, 201, t, p);
+    }
+    const tplSubmitMatch = p.match(/^\/api\/whatsapp\/templates\/(\d+)\/submit$/);
+    if (tplSubmitMatch && req.method === 'POST') {
+      if (!can(user, 'whatsapp', 'edit')) return forbidden();
+      const t = db.templates.find((x) => x.id === Number(tplSubmitMatch[1]));
+      if (!t) return send(res, 404, { error: 'template not found' }, p);
+      const cfg = metaConfig();
+      if (!cfg.configured) {
+        audit(actor, 'template', t.id, 'whatsapp_template_submit_dry_run', { name: t.name });
+        return send(res, 200, { ok: true, dry_run: true, configured: false, message: 'Meta is not configured — template kept as not_submitted', template: t }, p);
+      }
+      if (!t.body) return send(res, 400, { error: 'template body is required before submission' }, p);
+      const components = [{ type: 'BODY', text: t.body }];
+      if (Array.isArray(t.buttons) && t.buttons.length) components.push({ type: 'BUTTONS', buttons: t.buttons });
+      const r = await metaRequest('POST', `/${cfg.wabaId}/message_templates`, { name: t.name, category: 'UTILITY', language: 'ar', components });
+      if (!r.ok) {
+        audit(actor, 'template', t.id, 'whatsapp_template_submit_failed', { name: t.name, meta_error_code: r.meta_error_code || null });
+        return send(res, 502, { ok: false, dry_run: false, meta_error_code: r.meta_error_code || null, error: r.error || 'meta request failed', template: t }, p);
+      }
+      t.meta_status = mapMetaTemplateStatus(r.data && r.data.status) || 'pending';
+      if (r.data && r.data.id) t.meta_template_id = r.data.id;
+      audit(actor, 'template', t.id, 'whatsapp_template_submitted', { name: t.name, meta_status: t.meta_status }); save();
+      return send(res, 200, { ok: true, dry_run: false, configured: true, template: t }, p);
+    }
+    if (p === '/api/whatsapp/templates/sync' && req.method === 'POST') {
+      if (!can(user, 'whatsapp', 'edit')) return forbidden();
+      const cfg = metaConfig();
+      if (!cfg.configured) {
+        audit(actor, 'whatsapp', 0, 'whatsapp_templates_sync_dry_run');
+        return send(res, 200, { ok: true, dry_run: true, configured: false, message: 'Meta is not configured — local template states unchanged' }, p);
+      }
+      const r = await metaRequest('GET', `/${cfg.wabaId}/message_templates?fields=name,status,category,language&limit=100`, null);
+      if (!r.ok) {
+        audit(actor, 'whatsapp', 0, 'whatsapp_templates_sync_failed', { meta_error_code: r.meta_error_code || null });
+        return send(res, 502, { ok: false, dry_run: false, meta_error_code: r.meta_error_code || null, error: r.error || 'meta request failed' }, p);
+      }
+      let updated = 0;
+      const rows = (r.data && r.data.data) || [];
+      for (const row of rows) {
+        const tpl = db.templates.find((t) => t.name === row.name);
+        const mapped = mapMetaTemplateStatus(row.status);
+        if (tpl && mapped && tpl.meta_status !== mapped) { tpl.meta_status = mapped; updated++; }
+      }
+      // approval_status is local and is NEVER overwritten by Meta status.
+      audit(actor, 'whatsapp', 0, 'whatsapp_templates_synced', { updated, total_from_meta: rows.length }); save();
+      return send(res, 200, { ok: true, dry_run: false, configured: true, updated, total_from_meta: rows.length, synced_at: new Date().toISOString(), templates: db.templates.map((t) => ({ id: t.id, name: t.name, approval_status: t.approval_status, meta_status: t.meta_status })) }, p);
     }
 
     // ---- Connection checklist (10 steps; any authenticated user) ----

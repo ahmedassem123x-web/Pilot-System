@@ -4,7 +4,7 @@
 // `Authorization: Bearer <token>` on every request. On a 401 the token is
 // cleared and a `ps:unauthorized` event is fired so the app can show the
 // login screen again. No password or secret value is ever stored here.
-import type { AuditEntry, Contract, Conversation, Message, Task, Template, User, Workflow, WorkflowStep } from './types';
+import type { AuditEntry, Contract, Conversation, Message, Task, Template, User, WhatsAppSendInput, WhatsAppSendResult, WhatsAppStatusFull, WhatsAppTemplateCreateInput, WhatsAppTemplateSubmitResult, WhatsAppTemplateSyncResult, WhatsAppTestTokenResult, Workflow, WorkflowStep } from './types';
 
 const TOKEN_KEY = 'ps_token';
 export function getToken(): string | null { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } }
@@ -30,10 +30,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export interface MeUser extends User {}
-export interface WhatsAppStatus {
-  health: boolean; webhook_verify_configured: boolean; webhook_hmac_configured: boolean;
-  whatsapp_access_configured: boolean; templates_total: number; templates_approved: number;
-}
+export type WhatsAppStatus = WhatsAppStatusFull;
 export interface AutomationRule {
   id: number; name: string; category: string; trigger_type: string | null; trigger_value: string | null;
   steps: WorkflowStep[]; actions: unknown[]; is_active: boolean; deactivated_by_kill_switch?: boolean;
@@ -49,6 +46,18 @@ export const api = {
     req<{ ok: boolean }>('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ current_password, new_password }) }),
   departments: () => req<{ key: string; label_ar: string }[]>('/api/departments'),
   whatsappStatus: () => req<WhatsAppStatus>('/api/whatsapp/status'),
+  // Stage 5 Meta WhatsApp contract. None of these requests carries, returns,
+  // or stores any token/secret/phone/WABA value — test-token returns only
+  // booleans, and send returns only ok/dry_run/message ids or an error.
+  whatsappTestToken: () => req<WhatsAppTestTokenResult>('/api/whatsapp/test-token', { method: 'POST' }),
+  whatsappSend: (b: WhatsAppSendInput) =>
+    req<WhatsAppSendResult>('/api/whatsapp/send', { method: 'POST', body: JSON.stringify(b) }),
+  createWhatsAppTemplate: (b: WhatsAppTemplateCreateInput) =>
+    req<Template>('/api/whatsapp/templates', { method: 'POST', body: JSON.stringify(b) }),
+  submitWhatsAppTemplate: (id: number) =>
+    req<WhatsAppTemplateSubmitResult>(`/api/whatsapp/templates/${id}/submit`, { method: 'POST' }),
+  syncWhatsAppTemplates: () =>
+    req<WhatsAppTemplateSyncResult>('/api/whatsapp/templates/sync', { method: 'POST' }),
   connectionChecklist: () => req<ChecklistStep[]>('/api/connection-checklist'),
   contracts: () => req<Contract[]>('/api/contracts'),
   createContract: (b: { buyer_phone: string; seller_phone: string; product_description: string; amount: number; currency: string; delivery_point?: string }) =>

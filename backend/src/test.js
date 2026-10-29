@@ -214,6 +214,165 @@ server.listen(PORT, async () => {
     check('primary admin cannot be disabled', primaryDisable.status === 400, JSON.stringify(primaryDisable.body));
     const primaryDelete = await api(`/api/users/${meAgain.body.id}`, { method: 'DELETE' });
     check('primary admin cannot be deleted', primaryDelete.status === 400, JSON.stringify(primaryDelete.body));
+
+    // ---- New: Meta WhatsApp integration (mocked Graph API, throwaway env) ----
+    // All Meta env values below are generated in-process for this run only
+    // and are never written to any file. The mock is plain Node http.
+    const TEST_VERIFY = 'test-verify-' + crypto.randomBytes(8).toString('hex');
+    const TEST_SECRET = 'test-secret-' + crypto.randomBytes(16).toString('hex');
+    const TEST_TOKEN = 'test-token-' + crypto.randomBytes(16).toString('hex');
+    process.env.WHATSAPP_VERIFY_TOKEN = TEST_VERIFY;
+    process.env.WHATSAPP_APP_SECRET = TEST_SECRET;
+    delete process.env.META_MOCK_BASE_URL;
+    delete process.env.WHATSAPP_ACCESS_TOKEN;
+    delete process.env.WHATSAPP_PHONE_NUMBER_ID;
+    delete process.env.WHATSAPP_BUSINESS_ACCOUNT_ID;
+    delete process.env.WHATSAPP_API_VERSION;
+    const mockRequests = [];
+    let mockSeq = 0;
+    const mockHttp = require('http');
+    const mockServer = mockHttp.createServer((mreq, mres) => {
+      let b = '';
+      mreq.on('data', (c) => { b += c; });
+      mreq.on('end', () => {
+        let parsed = null; try { parsed = b ? JSON.parse(b) : null; } catch {}
+        mockRequests.push({ method: mreq.method, path: mreq.url, body: parsed });
+        mres.writeHead(200, { 'Content-Type': 'application/json' });
+        if (mreq.method === 'GET' && mreq.url.endsWith('/me')) return mres.end(JSON.stringify({ id: 'mock-me', name: 'Mock' }));
+        if (mreq.method === 'POST' && mreq.url.endsWith('/messages')) return mres.end(JSON.stringify({ messages: [{ id: 'wamid.mock.' + (++mockSeq) }] }));
+        if (mreq.method === 'GET' && mreq.url.includes('/message_templates')) return mres.end(JSON.stringify({ data: [{ name: 'contract_created', status: 'APPROVED', category: 'UTILITY', language: 'ar' }] }));
+        if (mreq.method === 'POST' && mreq.url.endsWith('/message_templates')) return mres.end(JSON.stringify({ id: 'mock-template-1', status: 'PENDING' }));
+        mres.end(JSON.stringify({}));
+      });
+    });
+    await new Promise((r) => mockServer.listen(0, '127.0.0.1', r));
+    const MOCK_PORT = mockServer.address().port;
+    // The earlier suite leaves the Kill Switch on; Meta send tests need it off.
+    await api('/api/automation/kill-switch', { method: 'POST', body: JSON.stringify({ off: false }) });
+    const hmacFor = (raw) => 'sha256=' + crypto.createHmac('sha256', TEST_SECRET).update(raw).digest('hex');
+    async function webhookRaw(raw, sig) {
+      const headers = { 'Content-Type': 'application/json' };
+      if (sig !== undefined) headers['x-hub-signature-256'] = sig;
+      const r = await fetch(base + '/api/whatsapp/webhook', { method: 'POST', headers, body: raw });
+      let body = {}; try { body = await r.json(); } catch {} return { status: r.status, body };
+    }
+    async function webhookGet(tokenVal) {
+      const r = await fetch(base + `/api/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=${encodeURIComponent(tokenVal)}&hub.challenge=CHALLENGE123`, { method: 'GET' });
+      return { status: r.status, text: await r.text() };
+    }
+    const inboundPayload = (from, wamid, text) => ({ object: 'whatsapp_business_account', entry: [{ id: 'waba-test', changes: [{ field: 'messages', value: { messaging_product: 'whatsapp', messages: [{ from, id: wamid, timestamp: String(Math.floor(Date.now() / 1000)), type: 'text', text: { body: text } }] } }] }] });
+    const statusPayload = (wamid, st) => ({ object: 'whatsapp_business_account', entry: [{ id: 'waba-test', changes: [{ field: 'messages', value: { statuses: [{ id: wamid, status: st, timestamp: String(Math.floor(Date.now() / 1000)) }] } }] }] });
+    const templateStatusPayload = (name, event) => ({ object: 'whatsapp_business_account', entry: [{ id: 'waba-test', changes: [{ field: 'message_template_status_update', value: { message_template_name: name, event } }] }] });
+
+    // Unauthenticated Meta endpoints rejected.
+    const unauthStatus = await api('/api/whatsapp/status', { noAuth: true });
+    check('unauthenticated whatsapp status rejected (401)', unauthStatus.status === 401);
+    const unauthSend = await api('/api/whatsapp/send', { method: 'POST', body: JSON.stringify({ to: '+967700000001', body: 'hi' }), noAuth: true });
+    check('unauthenticated whatsapp send rejected (401)', unauthSend.status === 401);
+    const unauthTestToken = await api('/api/whatsapp/test-token', { method: 'POST', body: JSON.stringify({}), noAuth: true });
+    check('unauthenticated whatsapp test-token rejected (401)', unauthTestToken.status === 401);
+
+    // Webhook verification success / failure.
+    const verifyOk = await webhookGet(TEST_VERIFY);
+    check('webhook verification success echoes challenge', verifyOk.status === 200 && verifyOk.text === 'CHALLENGE123', verifyOk.status + ' ' + verifyOk.text);
+    const verifyBad = await webhookGet('wrong-token');
+    check('webhook verification failure rejected (403)', verifyBad.status === 403);
+
+    // HMAC: bad signature, missing signature, invalid JSON, bad envelope.
+    const badRaw = JSON.stringify(inboundPayload('967700000001', 'wamid.bad.1', 'bad sig'));
+    const badSig = await webhookRaw(badRaw, 'sha256=' + '0'.repeat(64));
+    check('webhook bad signature rejected (401)', badSig.status === 401, JSON.stringify(badSig.body));
+    const missingSig = await webhookRaw(badRaw, undefined);
+    check('webhook missing signature rejected when secret set (401)', missingSig.status === 401, JSON.stringify(missingSig.body));
+    const invalidRaw = '{not json';
+    const invalidJson = await webhookRaw(invalidRaw, hmacFor(invalidRaw));
+    check('webhook invalid JSON rejected, not stored (400)', invalidJson.status === 400, JSON.stringify(invalidJson.body));
+    const badEnvRaw = JSON.stringify({ object: 'something_else', entry: [] });
+    const badEnv = await webhookRaw(badEnvRaw, hmacFor(badEnvRaw));
+    check('webhook invalid envelope rejected (400)', badEnv.status === 400, JSON.stringify(badEnv.body));
+
+    // Inbound to a matched contract conversation (buyer).
+    const buyerConvsBefore = await api(`/api/conversations?contract_id=${id}&party=buyer`);
+    const buyerConvId = buyerConvsBefore.body[0].id;
+    const inRaw = JSON.stringify(inboundPayload('967700000001', 'wamid.in.1', 'مرحبا، أريد الاستفسار'));
+    const inRes = await webhookRaw(inRaw, hmacFor(inRaw));
+    check('webhook inbound accepted (200)', inRes.status === 200 && inRes.body.messages === 1, JSON.stringify(inRes.body));
+    const buyerConvsAfter = await api(`/api/conversations?contract_id=${id}&party=buyer`);
+    check('inbound routed to matched contract conversation + unread bump', buyerConvsAfter.body[0].unread_count >= 1 && !!buyerConvsAfter.body[0].last_inbound_at, JSON.stringify(buyerConvsAfter.body[0]));
+    const buyerMsgs = await api(`/api/messages?conversation_id=${buyerConvId}`);
+    check('inbound message stored in buyer conversation', buyerMsgs.body.some((m) => m.wamid === 'wamid.in.1' && m.body === 'مرحبا، أريد الاستفسار' && m.direction === 'in'), JSON.stringify(buyerMsgs.body));
+
+    // Inbound to a general conversation (unknown phone, no contract created).
+    const genRaw = JSON.stringify(inboundPayload('967799999999', 'wamid.gen.1', 'سؤال عام'));
+    const genRes = await webhookRaw(genRaw, hmacFor(genRaw));
+    check('webhook general inbound accepted (200)', genRes.status === 200 && genRes.body.messages === 1, JSON.stringify(genRes.body));
+    const genConvs = await api('/api/conversations?party=general');
+    check('inbound from unknown phone creates GENERAL conversation, no contract', genConvs.body.some((c) => c.contract_id === null && c.party === 'general'), JSON.stringify(genConvs.body));
+    const contractsAfterGen = await api('/api/contracts');
+    check('webhook never creates a contract automatically', contractsAfterGen.body.length === 1, String(contractsAfterGen.body.length));
+
+    // wamid dedup: resending the same inbound payload stores nothing new.
+    const beforeDup = (await api(`/api/messages?conversation_id=${buyerConvId}`)).body.length;
+    const dupRes = await webhookRaw(inRaw, hmacFor(inRaw));
+    const afterDup = (await api(`/api/messages?conversation_id=${buyerConvId}`)).body.length;
+    check('wamid dedup skips duplicate inbound', dupRes.status === 200 && afterDup === beforeDup, `${beforeDup} -> ${afterDup}`);
+
+    // ---- Unconfigured (dry-run) phase: mock server running but unused ----
+    const statusUnconf = await api('/api/whatsapp/status');
+    check('status extended: unconfigured, 7 wizard steps, api_version v26.0', statusUnconf.status === 200 && statusUnconf.body.meta_configured === false && statusUnconf.body.api_version === 'v26.0' && Array.isArray(statusUnconf.body.wizard_steps) && statusUnconf.body.wizard_steps.length === 7 && statusUnconf.body.templates_total === 10, JSON.stringify(statusUnconf.body));
+    const ttDry = await api('/api/whatsapp/test-token', { method: 'POST', body: JSON.stringify({}) });
+    check('test-token dry-run when unconfigured (no Meta call)', ttDry.status === 200 && ttDry.body.configured === false && ttDry.body.meta_ok === false && ttDry.body.dry_run === true, JSON.stringify(ttDry.body));
+    const tplMarketing = await api('/api/whatsapp/templates', { method: 'POST', body: JSON.stringify({ name: 'promo_test', category: 'MARKETING', language: 'ar', body: 'اشتر الآن {{1}}' }) });
+    check('template create rejects Marketing category', tplMarketing.status === 400, JSON.stringify(tplMarketing.body));
+    const tplNew = await api('/api/whatsapp/templates', { method: 'POST', body: JSON.stringify({ name: 'test_notice', category: 'UTILITY', language: 'ar', body: 'تم إنشاء عقدك رقم {{1}}' }) });
+    check('template create local draft (UTILITY, not_submitted)', tplNew.status === 201 && tplNew.body.meta_status === 'not_submitted' && tplNew.body.approval_status === 'pending', JSON.stringify(tplNew.body));
+    const submitDry = await api(`/api/whatsapp/templates/${tplNew.body.id}/submit`, { method: 'POST', body: JSON.stringify({}) });
+    check('template submit dry-run when unconfigured keeps not_submitted', submitDry.status === 200 && submitDry.body.dry_run === true && submitDry.body.template.meta_status === 'not_submitted', JSON.stringify(submitDry.body));
+    const syncDry = await api('/api/whatsapp/templates/sync', { method: 'POST', body: JSON.stringify({}) });
+    check('template sync dry-run when unconfigured', syncDry.status === 200 && syncDry.body.dry_run === true, JSON.stringify(syncDry.body));
+    const sendDry = await api('/api/whatsapp/send', { method: 'POST', body: JSON.stringify({ to: '+967700000009', template_name: 'contract_created' }) });
+    check('template send dry-run when unconfigured records locally, no Meta call', sendDry.status === 200 && sendDry.body.dry_run === true && sendDry.body.message && sendDry.body.message.dry_run === true && mockRequests.length === 0, JSON.stringify(sendDry.body));
+    check('dry-run phase made zero Meta calls', mockRequests.length === 0, String(mockRequests.length));
+
+    // ---- Mock-configured phase ----
+    process.env.META_MOCK_BASE_URL = `http://127.0.0.1:${MOCK_PORT}`;
+    process.env.WHATSAPP_ACCESS_TOKEN = TEST_TOKEN;
+    process.env.WHATSAPP_PHONE_NUMBER_ID = '111222333';
+    process.env.WHATSAPP_BUSINESS_ACCOUNT_ID = '444555666';
+    const statusConf = await api('/api/whatsapp/status');
+    check('status extended: meta_configured when env set', statusConf.status === 200 && statusConf.body.meta_configured === true && statusConf.body.phone_number_configured === true && statusConf.body.waba_configured === true && statusConf.body.whatsapp_access_configured === true, JSON.stringify(statusConf.body));
+    const ttOk = await api('/api/whatsapp/test-token', { method: 'POST', body: JSON.stringify({}) });
+    check('test-token success via mock, no token value in response', ttOk.status === 200 && ttOk.body.meta_ok === true && ttOk.body.dry_run === false && !JSON.stringify(ttOk.body).includes(TEST_TOKEN), JSON.stringify(ttOk.body));
+    await api('/api/automation/kill-switch', { method: 'POST', body: JSON.stringify({ off: false }) });
+    const sendText = await api('/api/whatsapp/send', { method: 'POST', body: JSON.stringify({ to: '+967700000001', body: 'رد داخل النافذة' }) });
+    check('send text success via mock (in-window)', sendText.status === 200 && sendText.body.dry_run === false && typeof sendText.body.wamid === 'string' && sendText.body.wamid.startsWith('wamid.mock.'), JSON.stringify(sendText.body));
+    const sentWamid = sendText.body.wamid;
+    const sendTpl = await api('/api/whatsapp/send', { method: 'POST', body: JSON.stringify({ to: '+967700000001', template_name: 'contract_created', language: 'ar' }) });
+    check('send template success via mock', sendTpl.status === 200 && sendTpl.body.dry_run === false && sendTpl.body.message.template_name === 'contract_created', JSON.stringify(sendTpl.body));
+    check('mock received template send with template name', mockRequests.some((r) => r.body && r.body.type === 'template' && r.body.template && r.body.template.name === 'contract_created'), JSON.stringify(mockRequests.map((r) => r.body && r.body.type)));
+    const outside = await api('/api/whatsapp/send', { method: 'POST', body: JSON.stringify({ to: '+967788888888', body: 'نص حر خارج النافذة' }) });
+    check('free-text outside 24h window rejected', outside.status === 400 && outside.body.error === 'outside_24h_window_use_template', JSON.stringify(outside.body));
+    const stRaw = JSON.stringify(statusPayload(sentWamid, 'delivered'));
+    const stRes = await webhookRaw(stRaw, hmacFor(stRaw));
+    check('status update ingestion accepted', stRes.status === 200 && stRes.body.statuses === 1, JSON.stringify(stRes.body));
+    const stRaw2 = JSON.stringify(statusPayload(sentWamid, 'read'));
+    await webhookRaw(stRaw2, hmacFor(stRaw2));
+    const outMsgs = await api(`/api/messages?conversation_id=${buyerConvId}&direction=out`);
+    check('status update moves outbound message to read', outMsgs.body.some((m) => m.wamid === sentWamid && m.meta_status === 'read'), JSON.stringify(outMsgs.body));
+    const tplStRaw = JSON.stringify(templateStatusPayload('contract_created', 'APPROVED'));
+    const tplStRes = await webhookRaw(tplStRaw, hmacFor(tplStRaw));
+    check('template status ingestion accepted', tplStRes.status === 200 && tplStRes.body.templates === 1, JSON.stringify(tplStRes.body));
+    const tplAfter = await api('/api/templates');
+    const ccTpl = tplAfter.body.find((t) => t.name === 'contract_created');
+    check('template status ingestion updates meta_status only', ccTpl && ccTpl.meta_status === 'approved' && ccTpl.approval_status === 'approved', JSON.stringify(ccTpl));
+    const statusAfter = await api('/api/whatsapp/status');
+    check('status templates_meta_approved counts Meta approvals', statusAfter.body.templates_meta_approved >= 1, JSON.stringify(statusAfter.body));
+    check('no token value in any Meta response', !JSON.stringify([ttOk.body, sendText.body, sendTpl.body, statusConf.body]).includes(TEST_TOKEN));
+    await api('/api/automation/kill-switch', { method: 'POST', body: JSON.stringify({ off: true }) });
+    const ksSend = await api('/api/whatsapp/send', { method: 'POST', body: JSON.stringify({ to: '+967700000001', body: 'محظور' }) });
+    check('send rejected while kill switch is on', ksSend.status === 400 && /kill_switch_on/.test(ksSend.body.error || ''), JSON.stringify(ksSend.body));
+    await api('/api/automation/kill-switch', { method: 'POST', body: JSON.stringify({ off: false }) });
+    mockServer.close();
   } catch (e) { failed++; console.log('FAIL exception', e); }
   console.log(`RESULT passed=${passed} failed=${failed}`);
   server.close(() => {

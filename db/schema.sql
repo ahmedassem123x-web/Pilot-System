@@ -1,6 +1,11 @@
 -- Pilot System — مخطط قاعدة البيانات (PostgreSQL 16)
 -- قواعد ثابتة: سجل التدقيق إلحاقي فقط، الحذف منطقي لا فيزيائي،
 -- لا تأكيد مالي بدون مرجع مؤسسة، ولا عمود رصيد داخلي أبداً.
+-- NOTE (Stage 4/6): the runtime store TODAY is the JSON file
+-- (backend/src/data.json); this schema is the PRODUCTION Postgres
+-- target, not the live store. The additive WhatsApp notes at the end
+-- of this file describe columns to add at Postgres switch-on only;
+-- they do not change any of the 12 tables below.
 
 -- Departments are a fixed enumeration (no separate table, so the schema
 -- keeps its 12 tables): Operations, Finance Coordination, Customer
@@ -142,3 +147,40 @@ CREATE TABLE audit_log (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 -- لا يوجد UPDATE ولا DELETE على audit_log في كود التطبيق أبداً.
+
+-- =====================================================================
+-- Stage 4/6 (ADDITIVE ONLY, commented — apply at Postgres switch-on):
+-- WhatsApp / Meta fields. Nothing below alters the 12 tables above
+-- until it is deliberately applied; the runtime JSON store already
+-- carries these fields with the same names and meanings.
+-- ---------------------------------------------------------------------
+-- whatsapp_templates: Meta's view of a template, kept SEPARATE from the
+-- local approval_status (which is manual and must never be overwritten
+-- by a Meta sync). meta_template_id is Meta's id when one is returned.
+--   ALTER TABLE whatsapp_templates ADD COLUMN IF NOT EXISTS meta_status
+--     TEXT NOT NULL DEFAULT 'not_submitted'
+--     CHECK (meta_status IN ('not_submitted','pending','approved','rejected','paused','disabled'));
+--   ALTER TABLE whatsapp_templates ADD COLUMN IF NOT EXISTS meta_template_id TEXT;
+-- messages: wamid is Meta's message id (dedup key for inbound, status
+-- key for outbound); meta_status tracks sent/delivered/read/failed for
+-- outbound rows only; dry_run marks rows recorded while Meta was
+-- unconfigured (never render those as sent to WhatsApp).
+--   ALTER TABLE messages ADD COLUMN IF NOT EXISTS wamid TEXT UNIQUE;
+--   ALTER TABLE messages ADD COLUMN IF NOT EXISTS meta_status TEXT
+--     CHECK (meta_status IN ('sent','delivered','read','failed'));
+--   ALTER TABLE messages ADD COLUMN IF NOT EXISTS dry_run BOOLEAN NOT NULL DEFAULT FALSE;
+--   ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_phone TEXT;
+--   ALTER TABLE messages ADD COLUMN IF NOT EXISTS to_phone TEXT;
+--   ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_type TEXT;
+-- conversations: last_inbound_at drives the 24-hour customer-service
+-- window (free-form replies only within 24h of the last inbound
+-- message from that phone); a GENERAL conversation has contract_id
+-- NULL and party 'general' and carries the customer phone, so the
+-- Postgres CHECK on party must be widened and contract_id nullable:
+--   ALTER TABLE conversations ALTER COLUMN contract_id DROP NOT NULL;
+--   ALTER TABLE conversations DROP CONSTRAINT IF EXISTS conversations_party_check;
+--   ALTER TABLE conversations ADD CONSTRAINT conversations_party_check
+--     CHECK (party IN ('buyer','seller','general'));
+--   ALTER TABLE conversations ADD COLUMN IF NOT EXISTS phone TEXT;
+--   ALTER TABLE conversations ADD COLUMN IF NOT EXISTS last_inbound_at TIMESTAMPTZ;
+-- =====================================================================

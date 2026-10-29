@@ -68,7 +68,31 @@ export interface Workflow {
   id: number; name: string; trigger_type: string; trigger_value: string | null;
   steps: WorkflowStep[]; is_active: boolean;
 }
-export interface Template { id: number; name: string; language: string; category: string; approval_status: string; }
+export interface Template {
+  id: number; name: string; language: string; category: string; approval_status: string;
+  // Meta status (Stage 5 contract). Absent on older backends / local-only rows.
+  meta_status?: string; body?: string | null; buttons?: unknown; rejection_reason?: string | null;
+  label_ar?: string;
+}
+// Stage 5 Meta WhatsApp contract types (frontend/src/api.ts implements them).
+// No token, secret, phone number, WABA ID, or other credential value is
+// ever stored in these types — only booleans, counts, and statuses.
+export type WizardStepStatus = 'done' | 'pending' | 'blocked';
+export interface WhatsAppWizardStep { key: string; title_ar: string; status: WizardStepStatus; }
+export interface WhatsAppStatusFull {
+  health: boolean; webhook_verify_configured: boolean; webhook_hmac_configured: boolean;
+  whatsapp_access_configured: boolean; phone_number_configured?: boolean; waba_configured?: boolean;
+  api_version?: string; app_base_url?: string | null;
+  templates_total: number; templates_approved: number;
+  templates_meta_approved?: number; meta_configured?: boolean;
+  wizard_steps?: WhatsAppWizardStep[];
+}
+export interface WhatsAppTestTokenResult { ok: boolean; configured: boolean; meta_ok: boolean; dry_run?: boolean; error?: string; }
+export interface WhatsAppSendResult { ok: boolean; dry_run?: boolean; message_id?: string; wamid?: string; error?: string; }
+export interface WhatsAppTemplateSubmitResult { ok: boolean; dry_run?: boolean; meta_status?: string; template?: Template; error?: string; }
+export interface WhatsAppTemplateSyncResult { ok: boolean; dry_run?: boolean; updated?: number; error?: string; }
+export interface WhatsAppSendInput { to: string; body?: string; template_name?: string; language?: string; media?: unknown; }
+export interface WhatsAppTemplateCreateInput { name: string; category: 'UTILITY'; language: 'ar'; body: string; buttons?: string[]; }
 export interface User {
   id: number; full_name: string; email: string; role: Role; is_active: boolean;
   department?: string | null; sections?: string[]; actions?: Record<string, string[]>;
