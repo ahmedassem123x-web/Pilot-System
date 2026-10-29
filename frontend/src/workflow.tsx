@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api, local } from './api';
 import { Badge, Card, Empty, Field, LocalNote } from './components';
-import { FORBIDDEN_STEP_TYPES, STEP_TYPES, TRIGGER_TYPES, type Template, type Workflow, type WorkflowStep } from './types';
+import { FLOW_NODE_KINDS, FORBIDDEN_STEP_TYPES, STEP_TYPES, TRIGGER_TYPES, type Template, type Workflow, type WorkflowStep } from './types';
 
 type DraftStep = WorkflowStep & {
   content?: string; template_name?: string; media_url?: string; caption?: string;
@@ -36,6 +36,9 @@ export function WorkflowDesigner({ workflows, templates, reload }: { workflows: 
   const [simAns, setSimAns] = useState<Record<number, string>>({});
   const [simDone, setSimDone] = useState(false);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const [selected, setSelected] = useState(0);
+  const [ks, setKs] = useState<boolean | null>(null);
+  useEffect(() => { api.killSwitchGet().then((r) => setKs(r.killSwitch)).catch(() => setKs(null)); }, []);
 
   function loadIntoEditor(w: Workflow, copy: boolean) {
     setName(copy ? `نسخة من ${w.name}` : w.name);
@@ -63,6 +66,25 @@ export function WorkflowDesigner({ workflows, templates, reload }: { workflows: 
       setEditingId(null); reload();
     } catch (err) { setMsg('خطأ: ' + (err as Error).message); }
   }
+  // Properties panel for ONE selected canvas node only. Unselected nodes
+  // stay compact on the map; this panel is the only place a node is edited.
+  function stepFields(s: DraftStep, i: number) {
+    return <div className="grid2">
+      <Field label="نوع العقدة"><select value={s.step_type} onChange={(e) => update(i, blankStep(e.target.value))}>{STEP_TYPES.map((t) => <option key={t.type} value={t.type}>{t.ar}</option>)}</select></Field>
+      {['text', 'action'].includes(s.step_type) && <Field label={s.step_type === 'text' ? 'نص الرسالة' : 'وصف الإجراء التشغيلي (غير مالي)'}><input value={String(s.content || s.action_text || '')} onChange={(e) => update(i, s.step_type === 'text' ? { content: e.target.value } : { action_text: e.target.value })} /></Field>}
+      {s.step_type === 'template' && <Field label="القالب"><select value={s.template_name || ''} onChange={(e) => update(i, { template_name: e.target.value })}><option value="">اختر قالباً</option>{templates.map((t) => <option key={t.id} value={t.name}>{t.name}</option>)}</select></Field>}
+      {['image', 'video', 'audio', 'document'].includes(s.step_type) && <><Field label="رابط الوسائط"><input value={s.media_url || ''} onChange={(e) => update(i, { media_url: e.target.value })} placeholder="https://…" /></Field><Field label="تعليق"><input value={s.caption || ''} onChange={(e) => update(i, { caption: e.target.value })} /></Field></>}
+      {s.step_type === 'buttons' && <Field label="الأزرار (حتى 3 — زر في كل سطر)"><textarea rows={3} value={(s.buttons || []).join('\n')} onChange={(e) => update(i, { buttons: e.target.value.split('\n').slice(0, 3) })} /></Field>}
+      {s.step_type === 'list' && <Field label="عناصر القائمة (حتى 10 — عنصر في كل سطر)"><textarea rows={4} value={(s.items || []).join('\n')} onChange={(e) => update(i, { items: e.target.value.split('\n').slice(0, 10) })} /></Field>}
+      {['question_text', 'question_number'].includes(s.step_type) && <Field label="نص السؤال"><input value={s.question || ''} onChange={(e) => update(i, { question: e.target.value })} /></Field>}
+      {s.step_type === 'media_request' && <Field label="ما المطلوب من العميل؟"><input value={s.question || ''} onChange={(e) => update(i, { question: e.target.value })} placeholder="مثال: صورة المنتج قبل التغليف" /></Field>}
+      {s.step_type === 'condition' && <Field label="الشرط (وصف نصي — مثال: إذا أجاب العميل نعم)"><input value={s.condition_expr || ''} onChange={(e) => update(i, { condition_expr: e.target.value })} /></Field>}
+      {s.step_type === 'delay' && <Field label="مدة الانتظار (بالثواني)"><input type="number" min="0" value={s.delay_seconds ?? 60} onChange={(e) => update(i, { delay_seconds: Number(e.target.value) })} /></Field>}
+      {s.step_type === 'handover' && <Field label="ملاحظة التحويل للموظف"><input value={s.handover_note || ''} onChange={(e) => update(i, { handover_note: e.target.value })} /></Field>}
+      {s.step_type === 'end' && <p className="muted">ينهي التدفق هنا.</p>}
+    </div>;
+  }
+  const nodeStepType: Record<string, string> = { message: 'text', template: 'template', condition: 'condition', wait: 'delay', handover: 'handover', end: 'end' };
   const cur = steps[sim];
 
   return <>
@@ -80,39 +102,42 @@ export function WorkflowDesigner({ workflows, templates, reload }: { workflows: 
         <Field label="قيمة المشغّل (كلمة مفتاحية / حدث عقد)"><input value={triggerValue} onChange={(e) => setTriggerValue(e.target.value)} placeholder={triggerType === 'keyword' ? 'عقد جديد' : triggerType === 'contract-event' ? 'contract_accepted' : 'يدوي — اتركه فارغاً'} /></Field>
       </div>
 
-      <h3>الخطوات — اسحب لإعادة الترتيب، أو استخدم أزرار ↑ ↓ (بديل اللمس)</h3>
-      <p className="muted">أنواع الخطوات المتاحة: {STEP_TYPES.map((s) => s.ar).join('، ')}. الخطوات المالية (إفراج/استرداد/تأكيد دفع) غير موجودة في القائمة أصلاً ويرفضها الخادم.</p>
-      <div className="steps">
-        {steps.map((s, i) => <div key={i} className="step" draggable
-          onDragStart={() => setDragIdx(i)} onDragOver={(e) => e.preventDefault()}
-          onDrop={() => { if (dragIdx === null || dragIdx === i) return; const next = [...steps]; const [m] = next.splice(dragIdx, 1); next.splice(i, 0, m); setSteps(next); setDragIdx(null); }}>
-          <div className="step-head">
-            <span className="drag">☰</span><b>{i + 1}. {stepLabel(s)}</b>
-            <span className="step-btns">
-              <button onClick={() => move(i, -1)} title="للأعلى">↑</button>
-              <button onClick={() => move(i, 1)} title="للأسفل">↓</button>
-              <button onClick={() => setSteps(steps.filter((_, j) => j !== i))} title="حذف الخطوة">✕</button>
-            </span>
-          </div>
-          <div className="grid2">
-            <Field label="نوع الخطوة"><select value={s.step_type} onChange={(e) => update(i, blankStep(e.target.value))}>{STEP_TYPES.map((t) => <option key={t.type} value={t.type}>{t.ar}</option>)}</select></Field>
-            {['text', 'action'].includes(s.step_type) && <Field label={s.step_type === 'text' ? 'نص الرسالة' : 'وصف الإجراء التشغيلي (غير مالي)'}><input value={String(s.content || s.action_text || '')} onChange={(e) => update(i, s.step_type === 'text' ? { content: e.target.value } : { action_text: e.target.value })} /></Field>}
-            {s.step_type === 'template' && <Field label="القالب"><select value={s.template_name || ''} onChange={(e) => update(i, { template_name: e.target.value })}><option value="">اختر قالباً</option>{templates.map((t) => <option key={t.id} value={t.name}>{t.name}</option>)}</select></Field>}
-            {['image', 'video', 'audio', 'document'].includes(s.step_type) && <><Field label="رابط الوسائط"><input value={s.media_url || ''} onChange={(e) => update(i, { media_url: e.target.value })} placeholder="https://…" /></Field><Field label="تعليق"><input value={s.caption || ''} onChange={(e) => update(i, { caption: e.target.value })} /></Field></>}
-            {s.step_type === 'buttons' && <Field label="الأزرار (حتى 3 — زر في كل سطر)"><textarea rows={3} value={(s.buttons || []).join('\n')} onChange={(e) => update(i, { buttons: e.target.value.split('\n').slice(0, 3) })} /></Field>}
-            {s.step_type === 'list' && <Field label="عناصر القائمة (حتى 10 — عنصر في كل سطر)"><textarea rows={4} value={(s.items || []).join('\n')} onChange={(e) => update(i, { items: e.target.value.split('\n').slice(0, 10) })} /></Field>}
-            {['question_text', 'question_number'].includes(s.step_type) && <Field label="نص السؤال"><input value={s.question || ''} onChange={(e) => update(i, { question: e.target.value })} /></Field>}
-            {s.step_type === 'media_request' && <Field label="ما المطلوب من العميل؟"><input value={s.question || ''} onChange={(e) => update(i, { question: e.target.value })} placeholder="مثال: صورة المنتج قبل التغليف" /></Field>}
-            {s.step_type === 'condition' && <Field label="الشرط (وصف نصي — مثال: إذا أجاب العميل نعم)"><input value={s.condition_expr || ''} onChange={(e) => update(i, { condition_expr: e.target.value })} /></Field>}
-            {s.step_type === 'delay' && <Field label="مدة الانتظار (بالثواني)"><input type="number" min="0" value={s.delay_seconds ?? 60} onChange={(e) => update(i, { delay_seconds: Number(e.target.value) })} /></Field>}
-            {s.step_type === 'handover' && <Field label="ملاحظة التحويل للموظف"><input value={s.handover_note || ''} onChange={(e) => update(i, { handover_note: e.target.value })} /></Field>}
-            {s.step_type === 'end' && <p className="muted">ينهي التدفق هنا.</p>}
-          </div>
-        </div>)}
+      <h3>خريطة التدفق — انقر عقدة لتعديل خصائصها</h3>
+      <p className="muted">عقد مسموحة فقط: بداية، رسالة، قالب، شرط، انتظار، تحويل لموظف، إنهاء. لا توجد عقدة دفع ولا إرسال جماعي ولا كتالوج ولا بيع ذكي — مرفوضة في هذا النظام أبداً، ولا تظهر في اللوحة.</p>
+      <div className="flow-kill">
+        <span>مفتاح إيقاف الأتمتة على الخريطة: {ks === null ? 'جارٍ القراءة…' : ks ? 'مُفعَّل — كل إرسال آلي موقوف الآن' : 'متوقف — الأتمتة تعمل'}</span>
+        <button className="btn small ghost" onClick={async () => { try { const r = await api.killSwitchSet(!(ks || false)); setKs(r.killSwitch); reload(); } catch (err) { setMsg('خطأ: ' + (err as Error).message); } }}>{ks ? 'إعادة تشغيل الأتمتة' : 'إيقاف كل الأتمتة الآن'}</button>
+      </div>
+      <div className="flow-palette" aria-label="لوحة العقد">
+        <span className="small">أضف عقدة:</span>
+        {FLOW_NODE_KINDS.filter((n) => n.kind !== 'start').map((n) => <button key={n.kind} className="btn small ghost" onClick={() => { const st = blankStep(nodeStepType[n.kind]); setSteps([...steps, st]); setSelected(steps.length); }}>+ {n.ar}</button>)}
+      </div>
+      <div className="flow-canvas-wrap">
+        <div className="flow-canvas" aria-label="خريطة التدفق">
+          <div className="flow-node flow-start"><b>● بداية</b><span>{TRIGGER_TYPES.find((t) => t.type === triggerType)?.ar || triggerType}{triggerValue ? ` — ${triggerValue}` : ''}</span></div>
+          {steps.map((st, i) => <div key={i}>
+            <div className="flow-connector" aria-hidden="true">↓</div>
+            <div className={`flow-node ${selected === i ? 'sel' : ''}`} draggable
+              onClick={() => setSelected(i)}
+              onDragStart={() => setDragIdx(i)} onDragOver={(e) => e.preventDefault()}
+              onDrop={() => { if (dragIdx === null || dragIdx === i) return; const next = [...steps]; const [m] = next.splice(dragIdx, 1); next.splice(i, 0, m); setSteps(next); setDragIdx(null); setSelected(i); }}>
+              <span className="flow-node-num">{i + 1}</span>
+              <span className="flow-node-body"><b>{stepLabel(st)}</b><span className="small">{STEP_TYPES.find((x) => x.type === st.step_type)?.ar || st.step_type}</span></span>
+              <span className="flow-node-btns">
+                <button onClick={(e) => { e.stopPropagation(); move(i, -1); }} title="للأعلى">↑</button>
+                <button onClick={(e) => { e.stopPropagation(); move(i, 1); }} title="للأسفل">↓</button>
+                <button onClick={(e) => { e.stopPropagation(); setSteps(steps.filter((_, j) => j !== i)); setSelected(Math.max(0, i - 1)); }} title="حذف العقدة">✕</button>
+              </span>
+            </div>
+          </div>)}
+          {steps.length === 0 && <p className="muted">أضف عقدة من اللوحة أعلاه لبدء الخريطة.</p>}
+        </div>
+        <aside className="flow-props">
+          <h3>خصائص العقدة المحددة</h3>
+          {steps.length === 0 ? <Empty text="لا عقد بعد — أضف عقدة من اللوحة." /> : steps[selected] ? <>{stepFields(steps[selected], selected)}<p className="small">اسحب العقدة من مقبضها أو استخدم ↑ ↓ لإعادة ترتيب الخريطة (بديل اللمس).</p></> : <Empty text="اختر عقدة من الخريطة." />}
+        </aside>
       </div>
       <div className="btn-row">
-        <select className="inline-select" id="addStepSel" defaultValue="text">{STEP_TYPES.map((t) => <option key={t.type} value={t.type}>{t.ar}</option>)}</select>
-        <button className="btn ghost" onClick={() => { const el = document.getElementById('addStepSel') as HTMLSelectElement; setSteps([...steps, blankStep(el.value)]); }}>+ إضافة خطوة</button>
         <button className="btn" onClick={save}>حفظ التدفق في الخادم</button>
         <button className="btn ghost" onClick={() => { setPreview(!preview); setSim(0); setSimDone(false); }}>{preview ? 'إخفاء المعاينة' : 'معاينة واتساب + محاكاة'}</button>
       </div>

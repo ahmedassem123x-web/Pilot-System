@@ -51,16 +51,27 @@ export interface Contract {
   id: number; code: string; buyer_phone: string; seller_phone: string;
   product_description: string; amount: number; currency: string;
   delivery_point: string | null; state: State; clause_fingerprint: string;
-  created_at: string; version?: number;
+  created_at: string; version?: number; is_demo?: boolean;
 }
-export interface Conversation { id: number; contract_id: number | null; party: string; phone?: string | null; status: string; unread_count: number; assigned_to?: string | null; labels?: string[]; last_inbound_at?: string | null; pinned?: boolean; }
+export interface Conversation { id: number; contract_id: number | null; party: string; phone?: string | null; display_name?: string | null; is_demo?: boolean; automation_handed_off?: boolean; status: string; unread_count: number; assigned_to?: string | null; labels?: string[]; last_inbound_at?: string | null; pinned?: boolean; }
 export interface Message {
   id: number; conversation_id: number | null; direction: string;
   sender_name?: string; body: string | null; template_name: string | null;
-  is_internal_note: boolean; created_at: string;
+  is_internal_note: boolean; is_demo?: boolean; buttons?: string[]; created_at: string;
   meta_status?: string | null; media_type?: string | null; media_id?: string | null;
   wamid?: string | null; dry_run?: boolean; reply_to_id?: number | null; media_caption?: string | null; media_filename?: string | null;
 }
+// Flow-canvas node kinds (Round 3). ONLY these exist: no payment, no
+// broadcast, no catalog, no AI-selling node — ever.
+export const FLOW_NODE_KINDS = [
+  { kind: 'start', ar: 'بداية التدفق (المشغّل)' },
+  { kind: 'message', ar: 'رسالة نصية' },
+  { kind: 'template', ar: 'قالب واتساب' },
+  { kind: 'condition', ar: 'شرط / تفرّع' },
+  { kind: 'wait', ar: 'انتظار' },
+  { kind: 'handover', ar: 'تحويل لموظف' },
+  { kind: 'end', ar: 'إنهاء' },
+] as const;
 export interface QuickReply { id: number; shortcut: string; body: string; created_at: string; }
 export interface LinkingPayload {
   steps: WhatsAppWizardStep[]; done: number; blocked: number; configured: boolean;

@@ -1,15 +1,15 @@
 import { ROLE_AR, type MeUser } from './types';
 import {
-  IconBolt, IconChat, IconDoc, IconGrid, IconLink, IconReport,
-  IconSettings, IconShield, IconUsers,
+  IconBolt, IconChat, IconCheckSquare, IconDoc, IconGrid, IconInbox, IconLink, IconReport,
+  IconSettings, IconShield, IconUsers, IconWorkflow,
 } from './icons';
 
-export type MainTab = 'dashboard' | 'contracts' | 'inbox' | 'whatsapp' | 'automation' | 'users' | 'audit' | 'settings';
+export type MainTab = 'dashboard' | 'contracts' | 'inbox' | 'whatsapp' | 'automation' | 'ai' | 'team' | 'tickets' | 'feedback' | 'users' | 'audit' | 'settings';
 export interface SideNavItem { id: MainTab; label: string; section: string; icon: (p: { className?: string }) => React.ReactElement; }
 export const SIDE_GROUPS: { title: string; ids: MainTab[] }[] = [
-  { title: 'العمل اليومي', ids: ['dashboard', 'contracts', 'inbox'] },
-  { title: 'القنوات والأتمتة', ids: ['whatsapp', 'automation'] },
-  { title: 'الإدارة والمراجعة', ids: ['users', 'audit', 'settings'] },
+  { title: 'العمل اليومي', ids: ['dashboard', 'contracts', 'inbox', 'tickets'] },
+  { title: 'القنوات والأتمتة', ids: ['whatsapp', 'automation', 'ai'] },
+  { title: 'الإدارة والمراجعة', ids: ['users', 'team', 'audit', 'feedback', 'settings'] },
 ];
 export const SIDE_ITEMS: Record<MainTab, SideNavItem> = {
   dashboard: { id: 'dashboard', label: 'لوحة القيادة', section: 'dashboard', icon: IconGrid },
@@ -17,6 +17,10 @@ export const SIDE_ITEMS: Record<MainTab, SideNavItem> = {
   inbox: { id: 'inbox', label: 'الإنبكس والدردشة', section: 'inbox', icon: IconChat },
   whatsapp: { id: 'whatsapp', label: 'واتساب', section: 'whatsapp', icon: IconLink },
   automation: { id: 'automation', label: 'الأتمتة', section: 'automation', icon: IconBolt },
+  ai: { id: 'ai', label: 'مساعد الذكاء الاصطناعي', section: 'automation', icon: IconWorkflow },
+  team: { id: 'team', label: 'الفريق', section: 'users', icon: IconCheckSquare },
+  tickets: { id: 'tickets', label: 'تذاكري', section: 'tasks', icon: IconInbox },
+  feedback: { id: 'feedback', label: 'أفكار وملاحظات', section: 'audit', icon: IconChat },
   users: { id: 'users', label: 'المستخدمون', section: 'users', icon: IconUsers },
   audit: { id: 'audit', label: 'التدقيق والتقارير', section: 'audit', icon: IconReport },
   settings: { id: 'settings', label: 'إعدادات النظام', section: 'settings', icon: IconSettings },

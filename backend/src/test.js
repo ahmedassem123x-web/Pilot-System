@@ -752,6 +752,64 @@ server.listen(PORT, async () => {
     const pin2 = await api(`/api/conversations/${anyConv.id}/pin`, { method: 'POST' });
     check('pro pin conversation toggles off', pin2.status === 200 && pin2.body.pinned !== true, JSON.stringify(pin2.body));
 
+    // Round 3: demo conversation + triptych/flow node types.
+    const repBefore = await api('/api/reports/summary');
+    const demo1 = await api('/api/demo-conversation', { method: 'POST', body: JSON.stringify({}) });
+    check('round3 demo conversation created, test-only, no real phone, no contract', demo1.status === 201 && demo1.body.conversation && demo1.body.conversation.is_demo === true && !demo1.body.conversation.phone && demo1.body.conversation.contract_id === null && demo1.body.conversation.display_name, JSON.stringify(demo1.body.conversation));
+    const demoMsgs = demo1.body.messages || [];
+    check('round3 demo thread has incoming, reply, media, template-with-buttons, internal note', demoMsgs.length === 5 && demoMsgs.some((m) => m.direction === 'in' && !m.media_type && !m.is_internal_note) && demoMsgs.some((m) => m.direction === 'out' && !m.template_name && !m.is_internal_note) && demoMsgs.some((m) => m.media_type === 'image') && demoMsgs.some((m) => m.template_name === 'contract_accepted' && Array.isArray(m.buttons) && m.buttons.length === 2) && demoMsgs.some((m) => m.is_internal_note === true), JSON.stringify(demoMsgs.map((m) => ({ d: m.direction, t: m.template_name, mt: m.media_type, note: m.is_internal_note }))));
+    check('round3 demo thread spans two days (date separator)', new Set(demoMsgs.map((m) => String(m.created_at).slice(0, 10))).size === 2, JSON.stringify(demoMsgs.map((m) => m.created_at)));
+    const repAfterDemo = await api('/api/reports/summary');
+    check('round3 demo excluded from reports', repAfterDemo.status === 200 && repAfterDemo.body.conversations_total === repBefore.body.conversations_total && repAfterDemo.body.unread_total === repBefore.body.unread_total, JSON.stringify({ before: repBefore.body.conversations_total, after: repAfterDemo.body.conversations_total }));
+    const demo2 = await api('/api/demo-conversation', { method: 'POST', body: JSON.stringify({}) });
+    check('round3 demo creation is idempotent (same conversation)', demo2.status === 200 && demo2.body.already === true && demo2.body.conversation.id === demo1.body.conversation.id, JSON.stringify(demo2.body));
+    const demoReply = await api('/api/messages', { method: 'POST', body: JSON.stringify({ conversation_id: demo1.body.conversation.id, direction: 'out', sender_name: 'موظف', body: 'رد تجريبي محلي', is_internal_note: false, is_demo: true }) });
+    check('round3 demo reply stays marked demo', demoReply.status === 201 && demoReply.body.is_demo === true, JSON.stringify(demoReply.body));
+    const demoDel = await api('/api/demo-conversation', { method: 'DELETE' });
+    check('round3 demo one-button delete removes conversation and messages', demoDel.status === 200 && demoDel.body.conversations_deleted === 1 && demoDel.body.messages_deleted >= 5, JSON.stringify(demoDel.body));
+    const convsAfterDel = await api('/api/conversations');
+    check('round3 no demo conversation remains after delete', convsAfterDel.status === 200 && !convsAfterDel.body.some((c) => c.is_demo), JSON.stringify(convsAfterDel.body.map((c) => c.id)));
+    const typesSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'src', 'types.ts'), 'utf8');
+    const flowKinds = (typesSrc.match(/kind: '(start|message|template|condition|wait|handover|end)'/g) || []).length;
+    check('round3 flow palette has exactly the 7 allowed node kinds, no payment/broadcast/catalog/ai-sell node', flowKinds === 7 && !/kind: '(payment|broadcast|catalog|ai_sell|marketing)'/.test(typesSrc), String(flowKinds));
+    const wfSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'src', 'whatsapp-workspace.tsx'), 'utf8');
+    check('round3 workspace is a triptych (list/chat/details, no Card wrapper, no pill sub-tabs)', wfSrc.includes('wa-triptych') && wfSrc.includes('wa-details-panel') && !wfSrc.includes('<Card') && !wfSrc.includes('عرض الدردشة'), 'workspace structure');
+    const appSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'src', 'App.tsx'), 'utf8');
+    check('round3 inbox has no sub-tabs in nav', !appSrc.includes("id: 'conversations', label: 'المحادثات'") && appSrc.includes('main-inbox'), 'nav');
+
+    // Expanded brief: contract PDF, demo contract, MazBot-adapted sections.
+    const pdfUnauth = await fetch(base + '/api/contracts/1/pdf');
+    check('expanded pdf unauthenticated rejected (401)', pdfUnauth.status === 401, String(pdfUnauth.status));
+    const pdfMissing = await api('/api/contracts/999999/pdf');
+    check('expanded pdf missing contract returns 404', pdfMissing.status === 404, JSON.stringify(pdfMissing.body));
+    const pdfContract = await api('/api/contracts', { method: 'POST', body: JSON.stringify({ buyer_phone: '+967700000001', seller_phone: '+967700000002', product_description: 'منتج اختبار PDF', amount: 250, currency: 'SAR', delivery_point: 'صنعاء' }) });
+    check('expanded pdf test contract created', pdfContract.status === 201 && pdfContract.body.id, JSON.stringify(pdfContract.body));
+    const pdfRes = await fetch(base + `/api/contracts/${pdfContract.body.id}/pdf`, { headers: { Authorization: 'Bearer ' + token } });
+    const pdfBuf = Buffer.from(await pdfRes.arrayBuffer());
+    check('expanded contract pdf returns application/pdf with %PDF header', pdfRes.status === 200 && (pdfRes.headers.get('content-type') || '').includes('application/pdf') && pdfBuf.slice(0, 4).toString() === '%PDF' && pdfBuf.length > 10000, `status=${pdfRes.status} type=${pdfRes.headers.get('content-type')} size=${pdfBuf.length}`);
+    check('expanded contract pdf has attachment filename with contract code', (pdfRes.headers.get('content-disposition') || '').includes('contract-'), pdfRes.headers.get('content-disposition') || '');
+    const { buildPdf } = require('./pdf.js');
+    const pdfDirect = buildPdf([{ text: 'رقم العقد: PS-2026-TEST', size: 16 }, { text: 'SHA-256: ' + 'a'.repeat(64), size: 11 }]);
+    check('expanded pdf generator builds a valid PDF buffer from Arabic lines', Buffer.isBuffer(pdfDirect) && pdfDirect.slice(0, 4).toString() === '%PDF' && pdfDirect.length > 1000, String(pdfDirect.length));
+    const repBeforeDemoC = await api('/api/reports/summary');
+    const demoC1 = await api('/api/demo-contract', { method: 'POST', body: JSON.stringify({}) });
+    check('expanded demo contract created, labelled demo, draft', demoC1.status === 201 && demoC1.body.contract && demoC1.body.contract.is_demo === true && demoC1.body.contract.state === 'draft', JSON.stringify(demoC1.body.contract));
+    const demoC2 = await api('/api/demo-contract', { method: 'POST', body: JSON.stringify({}) });
+    check('expanded demo contract creation is idempotent', demoC2.status === 200 && demoC2.body.already === true && demoC2.body.contract.id === demoC1.body.contract.id, JSON.stringify(demoC2.body));
+    const repAfterDemoC = await api('/api/reports/summary');
+    check('expanded demo contract excluded from reports', repAfterDemoC.status === 200 && repAfterDemoC.body.contracts_total === repBeforeDemoC.body.contracts_total, JSON.stringify({ before: repBeforeDemoC.body.contracts_total, after: repAfterDemoC.body.contracts_total }));
+    const demoPdf = await fetch(base + `/api/contracts/${demoC1.body.contract.id}/pdf`, { headers: { Authorization: 'Bearer ' + token } });
+    check('expanded demo contract pdf downloads too', demoPdf.status === 200 && (demoPdf.headers.get('content-type') || '').includes('application/pdf'), String(demoPdf.status));
+    const demoCDel = await api('/api/demo-contract', { method: 'DELETE' });
+    check('expanded demo contract one-button delete removes it', demoCDel.status === 200 && demoCDel.body.contracts_deleted === 1, JSON.stringify(demoCDel.body));
+    const mazSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'src', 'mazbot-sections.tsx'), 'utf8');
+    check('expanded mazbot sections exist (overview/insights/conversions/handoff/widget/ai/team/tickets/feedback/billing/webhook/api/integrations)', ['WhatsAppOverview', 'WhatsAppInsights', 'WhatsAppConversions', 'HandoffPage', 'ChatWidgetPage', 'AIWorkspace', 'TeamPerformance', 'Distribution', 'MyTickets', 'FeedbackPage', 'BillingPage', 'WebhookPage', 'ApiPage', 'IntegrationsPage'].every((n) => mazSrc.includes(n)), 'sections');
+    check('expanded ai sections are draft-only (no auto-send node, no selling)', mazSrc.includes('مسودة فقط') && !mazSrc.includes("kind: 'ai_sell'") && !/sendToCustomer|autoSend\(/.test(mazSrc), 'ai draft-only');
+    check('expanded mazbot sections contain no broadcast endpoint or campaign builder', !mazSrc.includes('/api/broadcast') && !/createCampaign|startCampaign/.test(mazSrc) && mazSrc.includes('لا حملات'), 'no broadcast');
+    const mapDoc = fs.readFileSync(path.join(__dirname, '..', '..', 'docs', 'mazbot-menu-map.md'), 'utf8');
+    check('expanded menu map records Campaigns and Invite & earn as rejected with reasons', mapDoc.includes('Campaigns — REJECTED') && mapDoc.includes('Invite & earn — REJECTED'), 'menu map');
+    check('expanded nav: whatsapp subs include overview and designer, automation has no designer sub', appSrc.includes("id: 'overview'") && appSrc.includes("id: 'designer', label: 'منشئ التدفقات'") && !appSrc.includes("id: 'automation', label: 'الأتمتة', section: 'automation', icon: IconBolt, subs: [\n    { id: 'rules', label: 'القواعد' },\n    { id: 'designer'"), 'nav dedupe');
+
     mockServer.close();
 
   } catch (e) { failed++; console.log('FAIL exception', e); }

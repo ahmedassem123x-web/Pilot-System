@@ -24,7 +24,7 @@ export function hasAction(me: MeUser | null, section: string, action: string) {
 
 export interface Bundle {
   contracts: Contract[]; conversations: Conversation[]; messages: Message[];
-  tasks: { id: number; contract_id: number; title: string; type: string; status: string; financial_reference?: string }[];
+  tasks: { id: number; contract_id: number; title: string; type: string; status: string; financial_reference?: string; assigned_to?: string | null }[];
   workflows: Workflow[]; templates: Template[]; users: User[]; audit: AuditEntry[];
   killSwitch: boolean; healthOk: boolean;
 }
@@ -33,11 +33,13 @@ export function contractById(b: Bundle, id: number) { return b.contracts.find((c
 /* ---------------- Dashboard ---------------- */
 export function Dashboard({ b, reload, onOpenDesigner }: { b: Bundle; reload: () => void; onOpenDesigner?: () => void }) {
   const openTasks = b.tasks.filter((t) => (local.taskOverrides()[t.id] || t.status) === 'open').length;
-  const unread = b.conversations.reduce((s, c) => s + (c.unread_count || 0), 0);
+  const realConvs = b.conversations.filter((c) => !c.is_demo);
+  const unread = realConvs.reduce((s, c) => s + (c.unread_count || 0), 0);
   const byState = useMemo(() => {
     const m: Record<string, number> = {}; b.contracts.forEach((c) => { m[c.state] = (m[c.state] || 0) + 1; }); return m;
   }, [b.contracts]);
-  const latest = [...b.contracts].slice(-5).reverse();
+  const realContracts = b.contracts.filter((c) => !c.is_demo);
+  const latest = [...realContracts].slice(-5).reverse();
   // Every number below comes from the backend API bundle (b.*) only.
   // When the system starts empty they read 0 — no demo number is ever shown.
   // 0 is rendered with the same large type, spacing and icon treatment.
@@ -51,8 +53,8 @@ export function Dashboard({ b, reload, onOpenDesigner }: { b: Bundle; reload: ()
       </div>
     </div>
     <div className="stats">
-      <div className="stat"><div className="stat-top"><b>{b.contracts.length}</b><span className="stat-icon-box"><IconDoc /></span></div><span className="stat-label">إجمالي العقود</span><span className="stat-sub">جميع الحالات — من الخادم</span></div>
-      <div className="stat"><div className="stat-top"><b>{b.conversations.length}</b><span className="stat-icon-box"><IconChat /></span></div><span className="stat-label">محادثات</span><span className="stat-sub">محادثة مستقلة لكل طرف في كل عقد</span></div>
+      <div className="stat"><div className="stat-top"><b>{realContracts.length}</b><span className="stat-icon-box"><IconDoc /></span></div><span className="stat-label">إجمالي العقود</span><span className="stat-sub">جميع الحالات — من الخادم، التجريبي لا يُحتسب</span></div>
+      <div className="stat"><div className="stat-top"><b>{realConvs.length}</b><span className="stat-icon-box"><IconChat /></span></div><span className="stat-label">محادثات</span><span className="stat-sub">محادثة مستقلة لكل طرف في كل عقد — التجريبية لا تُحتسب</span></div>
       <div className="stat"><div className="stat-top"><b>{unread}</b><span className="stat-icon-box"><IconInbox /></span></div><span className="stat-label">رسائل غير مقروءة</span><span className={`stat-sub ${unread > 0 ? 'attention' : ''}`}>{unread === 0 ? 'لا رسائل بانتظار القراءة' : 'بانتظار القراءة والرد'}</span></div>
       <div className="stat"><div className="stat-top"><b>{openTasks}</b><span className="stat-icon-box"><IconCheckSquare /></span></div><span className="stat-label">مهام مفتوحة</span><span className={`stat-sub ${openTasks > 0 ? 'attention' : ''}`}>مهام تشغيل لم تُنجز بعد</span></div>
       <div className="stat"><div className="stat-top"><b>{approvedTemplates} / {b.templates.length}</b><span className="stat-icon-box"><IconTemplate /></span></div><span className="stat-label">قوالب معتمدة</span><span className="stat-sub">من قوالب واتساب في الخادم</span></div>
@@ -65,12 +67,12 @@ export function Dashboard({ b, reload, onOpenDesigner }: { b: Bundle; reload: ()
     <Card title="عبء الفريق — محادثات مكلَّف بها">
       {(() => {
         const byAssignee: Record<string, number> = {};
-        b.conversations.forEach((c) => { if (c.assigned_to) byAssignee[c.assigned_to] = (byAssignee[c.assigned_to] || 0) + 1; });
+        realConvs.forEach((c) => { if (c.assigned_to) byAssignee[c.assigned_to] = (byAssignee[c.assigned_to] || 0) + 1; });
         const entries = Object.entries(byAssignee);
         return entries.length === 0 ? <Empty text="لا محادثات مكلَّف بها بعد — التعيين يتم من صفحة الإنبكس." /> :
           <div className="chips">{entries.map(([name, n]) => <span key={name} className="chip">{name}: {n} محادثة</span>)}</div>;
       })()}
-      <p className="muted">محادثات مفتوحة: {b.conversations.filter((c) => c.status === 'open' || c.status === 'new').length} — مهام مفتوحة: {openTasks} — رسائل غير مقروءة: {unread}</p>
+      <p className="muted">محادثات مفتوحة: {realConvs.filter((c) => c.status === 'open' || c.status === 'new').length} — مهام مفتوحة: {openTasks} — رسائل غير مقروءة: {unread}</p>
     </Card>
     <Card title="أحدث العقود" sub="آخر 5 عقود من الخادم — افتح صفحة العقود لعرض القائمة الكاملة والتفاصيل.">
       {latest.length === 0 ? <Empty text="لا عقود بعد — أنشئ أول عقد من صفحة العقود." /> :
@@ -125,6 +127,12 @@ export function Contracts({ b, reload, sub }: { b: Bundle; reload: () => void; s
         <Field label="نقطة التسليم (اختياري)"><input value={form.delivery_point} onChange={(e) => setForm({ ...form, delivery_point: e.target.value })} /></Field>
         <button className="btn" type="submit">إنشاء العقد</button>
       </form>
+      <div className="btn-row">
+        {b.contracts.some((c) => c.is_demo)
+          ? <><span className="wa-demo-badge">عقد تجريبي موجود</span><button className="btn small ghost" onClick={async () => { try { const r = await api.deleteDemoContract(); setMsg(`تم حذف العقد التجريبي — ${r.contracts_deleted} عقد.`); reload(); } catch (err) { setMsg('خطأ: ' + (err as Error).message); } }}>حذف العقد التجريبي</button></>
+          : <button className="btn small ghost" onClick={async () => { try { const r = await api.createDemoContract(); setMsg(r.already ? 'العقد التجريبي موجود أصلاً.' : `تم إنشاء العقد التجريبي ${r.contract.code} — تجريبي فقط، لا يُحتسب في التقارير.`); reload(); } catch (err) { setMsg('خطأ: ' + (err as Error).message); } }}>إنشاء عقد تجريبي للعرض</button>}
+      </div>
+      <p className="muted">العقد التجريبي موسوم «تجريبي»، بلا عميل حقيقي، ولا يُحتسب في التقارير، ويُحذف بزر واحد — ليُحكم على النظام كاملاً قبل الربط مع Meta.</p>
       {msg && <p className="msg">{msg}</p>}
     </Card>}
 
@@ -132,14 +140,14 @@ export function Contracts({ b, reload, sub }: { b: Bundle; reload: () => void; s
       {list.length === 0 ? <Empty text="لا عقود مطابقة." /> :
         <table><thead><tr><th>الكود</th><th>المشتري / البائع</th><th>المنتج</th><th>المبلغ</th><th>الحالة</th><th></th></tr></thead>
         <tbody>{list.map((c) => <tr key={c.id} className={selId === c.id ? 'row-sel' : ''}>
-          <td><b>{c.code}</b></td><td><div className="small">{c.buyer_phone}</div><div className="small">{c.seller_phone}</div></td>
+          <td><b>{c.code}</b>{c.is_demo && <span className="wa-demo-badge"> تجريبي</span>}</td><td><div className="small">{c.buyer_phone}</div><div className="small">{c.seller_phone}</div></td>
           <td>{c.product_description}</td><td>{c.amount} {c.currency}</td>
           <td><Badge tone={stateTone(c.state)}>{STATE_AR[c.state]}</Badge></td>
-          <td><button className="btn small" onClick={() => { setSelId(c.id); setMsg(''); }}>تفاصيل</button> <button className="btn small ghost" onClick={() => openAmend(c)}>تعديل / إصدارات</button></td>
+          <td><button className="btn small" onClick={() => { setSelId(c.id); setMsg(''); }}>تفاصيل</button> <button className="btn small ghost" onClick={() => openAmend(c)}>تعديل / إصدارات</button> <button className="btn small ghost" onClick={async () => { try { const blob = await api.downloadContractPdf(c.id); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `contract-${c.code}.pdf`; a.click(); URL.revokeObjectURL(url); setMsg(`تم تنزيل PDF العقد ${c.code}.`); } catch (err) { setMsg('خطأ في تنزيل PDF: ' + (err as Error).message); } }}>تنزيل PDF</button></td>
         </tr>)}</tbody></table>}
     </Card>}
 
-    {showList && sel && <Card title={`تفاصيل ${sel.code}`} sub={`بصمة البنود (SHA-256): ${sel.clause_fingerprint}`}>
+    {showList && sel && <Card title={`تفاصيل ${sel.code}${sel.is_demo ? ' — تجريبي' : ''}`} sub={`بصمة البنود (SHA-256): ${sel.clause_fingerprint}`} actions={<button className="btn small" onClick={async () => { try { const blob = await api.downloadContractPdf(sel.id); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `contract-${sel.code}.pdf`; a.click(); URL.revokeObjectURL(url); setMsg(`تم تنزيل PDF العقد ${sel.code}.`); } catch (err) { setMsg('خطأ في تنزيل PDF: ' + (err as Error).message); } }}>تنزيل العقد PDF</button>}>
       <div className="grid2">
         <p><b>المنتج:</b> {sel.product_description}</p><p><b>المبلغ:</b> {sel.amount} {sel.currency}</p>
         <p><b>المشتري:</b> {sel.buyer_phone}</p><p><b>البائع:</b> {sel.seller_phone}</p>
@@ -219,15 +227,10 @@ export function ContractVersions({ b }: { b: Bundle }) {
 // point used by every nav route (main Inbox tab and WhatsApp section);
 // it does NOT duplicate the workspace. The 'notes' sub-view is the
 // internal-notes filter over the same messages.
-export function Inbox({ b, reload, me, sub }: { b: Bundle; reload: () => void; me: MeUser | null; sub?: 'conversations' | 'chat' | 'assigned' | 'notes' }) {
-  if (sub === 'notes') {
-    const notes = b.messages.filter((m) => m.is_internal_note).sort((x, y) => y.id - x.id);
-    return <Card title="الملاحظات الداخلية" sub="ملاحظات الفريق فقط — لا تُرسل للعميل ولا تظهر في عرض العميل أبداً.">
-      {notes.length === 0 ? <Empty text="لا ملاحظات داخلية بعد — تُنشأ من عرض الدردشة بتفعيل خيار «ملاحظة داخلية فقط»." /> :
-        <table><thead><tr><th>المحادثة</th><th>المرسل</th><th>الملاحظة</th><th>الوقت</th></tr></thead>
-        <tbody>{notes.map((m) => <tr key={m.id}><td>{contractById(b, m.conversation_id || 0)?.code || m.conversation_id}</td><td>{m.sender_name || '—'}</td><td>{m.body}</td><td className="small">{fmt(m.created_at)}</td></tr>)}</tbody></table>}
-    </Card>;
-  }
+export function Inbox({ b, reload, me }: { b: Bundle; reload: () => void; me: MeUser | null }) {
+  // Round 3: the triptych IS the inbox. The old notes card and the old
+  // sub-tab views are DELETED — notes live in the thread (as system
+  // notices) and in the details panel, filters live in the list header.
   return <WhatsAppWorkspace b={b} reload={reload} me={me} />;
 }
 

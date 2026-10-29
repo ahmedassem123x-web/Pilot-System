@@ -5,14 +5,15 @@ import {
   SystemSettings, Tasks, Templates, Users, WhatsApp, WhatsAppMedia, hasAction, hasSection, type Bundle,
 } from './views';
 import { WorkflowDesigner } from './workflow';
+import { AIWorkspace, ApiPage, AutoReplies, BillingPage, ChatWidgetPage, ContactLists, Distribution, FeedbackPage, HandoffPage, IntegrationsPage, MyTickets, QASettings, SegmentsPage, TagsPage, TeamPerformance, UserInputResponses, WebhookPage, WhatsAppConversions, WhatsAppInsights, WhatsAppOverview } from './mazbot-sections';
 import { Sidebar, type MainTab as SideTab } from './sidebar';
 import { type MeUser } from './types';
 import {
-  IconBolt, IconChat, IconCheckSquare, IconDoc, IconGrid, IconLink, IconReport,
+  IconBolt, IconChat, IconCheckSquare, IconDoc, IconGrid, IconInbox, IconLink, IconReport,
   IconSettings, IconShield, IconTemplate, IconUsers, IconWorkflow,
 } from './icons';
 
-type MainTab = 'dashboard' | 'contracts' | 'inbox' | 'whatsapp' | 'automation' | 'users' | 'audit' | 'settings';
+type MainTab = 'dashboard' | 'contracts' | 'inbox' | 'whatsapp' | 'automation' | 'ai' | 'team' | 'tickets' | 'feedback' | 'users' | 'audit' | 'settings';
 interface Sub { id: string; label: string; section?: string; action?: string; }
 interface NavItem { id: MainTab; label: string; section: string; icon: (p: { className?: string }) => React.ReactElement; subs: Sub[]; }
 const NAV: NavItem[] = [
@@ -23,27 +24,57 @@ const NAV: NavItem[] = [
     { id: 'versions', label: 'النسخ' },
     { id: 'tasks', label: 'مهام التشغيل', section: 'tasks' },
   ] },
-  { id: 'inbox', label: 'الإنبكس والدردشة', section: 'inbox', icon: IconChat, subs: [
-    { id: 'conversations', label: 'المحادثات' },
-    { id: 'chat', label: 'عرض الدردشة' },
-    { id: 'assigned', label: 'المعيّنة لي' },
-    { id: 'notes', label: 'الملاحظات الداخلية' },
-  ] },
+  // Round 3: Inbox is ONE entry with NO sub-tabs. The old pills
+  // (المحادثات / عرض الدردشة / المعيّنة لي / الملاحظات الداخلية) were
+  // DELETED — their filters live inside the triptych list header now.
+  { id: 'inbox', label: 'الإنبكس والدردشة', section: 'inbox', icon: IconChat, subs: [] },
   // Professional hierarchy (Pass 3): ONE entry per screen. Inbox lives only
   // under the Inbox tab, Automation only under Automation, linking only
   // under WhatsApp > connection. WhatsApp subs are only what WhatsApp owns.
   { id: 'whatsapp', label: 'واتساب', section: 'whatsapp', icon: IconLink, subs: [
-    { id: 'connection', label: 'الربط والحسابات' },
-    { id: 'templates', label: 'القوالب' },
+    { id: 'overview', label: 'نظرة عامة' },
+    { id: 'insights', label: 'رؤى التسليم' },
+    { id: 'conversions', label: 'تحويلات العقود' },
+    { id: 'lists', label: 'قوائم جهات الاتصال' },
+    { id: 'segments', label: 'الشرائح' },
+    { id: 'tags', label: 'الوسوم' },
     { id: 'contacts', label: 'جهات الاتصال' },
+    { id: 'auto-replies', label: 'الردود التلقائية' },
+    { id: 'designer', label: 'منشئ التدفقات' },
+    { id: 'user-input', label: 'ردود إدخال المستخدم' },
+    { id: 'handoff', label: 'التحويل البشري' },
+    { id: 'templates', label: 'القوالب' },
+    { id: 'chat-widget', label: 'أداة الدردشة' },
+    { id: 'connection', label: 'الربط والحسابات' },
     { id: 'media', label: 'الوسائط' },
-    { id: 'settings', label: 'الإعدادات' },
+    { id: 'settings', label: 'إعدادات واتساب' },
   ] },
   { id: 'automation', label: 'الأتمتة', section: 'automation', icon: IconBolt, subs: [
     { id: 'rules', label: 'القواعد' },
-    { id: 'designer', label: 'مصمّم التدفقات' },
     { id: 'killswitch', label: 'مفتاح الإيقاف' },
   ] },
+  // Round 3 expanded brief (MazBot hierarchy, adapted): AI gated by
+  // automation permission, Team by users, Tickets by tasks, Feedback by
+  // audit — so no permission-system change is needed for new sections.
+  { id: 'ai', label: 'مساعد الذكاء الاصطناعي', section: 'automation', icon: IconWorkflow, subs: [
+    { id: 'dashboard', label: 'لوحة المساعد' },
+    { id: 'credits', label: 'الأرصدة' },
+    { id: 'settings', label: 'إعدادات المساعد' },
+    { id: 'agents', label: 'الوكلاء' },
+    { id: 'test-chat', label: 'دردشة الاختبار' },
+    { id: 'quotas', label: 'الحصص' },
+    { id: 'triggers', label: 'المشغّلات' },
+    { id: 'business-hours', label: 'ساعات العمل' },
+    { id: 'knowledge-base', label: 'قاعدة المعرفة' },
+  ] },
+  { id: 'team', label: 'الفريق', section: 'users', icon: IconUsers, subs: [
+    { id: 'members', label: 'أعضاء الفريق' },
+    { id: 'performance', label: 'الأداء والمؤشرات' },
+    { id: 'distribution', label: 'توزيع المهام' },
+    { id: 'qa', label: 'إعدادات الجودة' },
+  ] },
+  { id: 'tickets', label: 'تذاكري', section: 'tasks', icon: IconInbox, subs: [] },
+  { id: 'feedback', label: 'أفكار وملاحظات', section: 'audit', icon: IconChat, subs: [] },
   { id: 'users', label: 'المستخدمون', section: 'users', icon: IconUsers, subs: [
     { id: 'list', label: 'قائمة المستخدمين' },
     { id: 'add', label: 'إضافة مستخدم' },
@@ -53,7 +84,11 @@ const NAV: NavItem[] = [
   ] },
   { id: 'audit', label: 'التدقيق والتقارير', section: 'audit', icon: IconReport, subs: [] },
   { id: 'settings', label: 'إعدادات النظام', section: 'settings', icon: IconSettings, subs: [
-    { id: 'system', label: 'إعدادات النظام' },
+    { id: 'system', label: 'إعدادات عامة' },
+    { id: 'billing', label: 'تفاصيل الفوترة' },
+    { id: 'webhook', label: 'Webhook' },
+    { id: 'api', label: 'API' },
+    { id: 'integrations', label: 'التكاملات' },
   ] },
 ];
 const EMPTY: Bundle = { contracts: [], conversations: [], messages: [], tasks: [], workflows: [], templates: [], users: [], audit: [], killSwitch: false, healthOk: false };
@@ -74,9 +109,9 @@ interface TopTab { key: string; label: string; icon: (p: { className?: string })
 const TOP_TABS: TopTab[] = [
   { key: 'dashboard', label: 'لوحة القيادة', icon: IconGrid, main: 'dashboard', section: 'dashboard' },
   { key: 'contracts', label: 'العقود والمعاملات', icon: IconDoc, main: 'contracts', sub: 'list', section: 'contracts' },
-  { key: 'inbox', label: 'الإنبكس', icon: IconChat, main: 'inbox', sub: 'conversations', section: 'inbox' },
+  { key: 'inbox', label: 'الإنبكس', icon: IconChat, main: 'inbox', section: 'inbox' },
   { key: 'tasks', label: 'مهام التشغيل', icon: IconCheckSquare, main: 'contracts', sub: 'tasks', section: 'tasks' },
-  { key: 'designer', label: 'مصمّم الورك فلو', icon: IconWorkflow, main: 'automation', sub: 'designer', section: 'automation' },
+  { key: 'designer', label: 'منشئ التدفقات', icon: IconWorkflow, main: 'whatsapp', sub: 'designer', section: 'whatsapp' },
   { key: 'templates', label: 'قوالب واتساب', icon: IconTemplate, main: 'whatsapp', sub: 'templates', section: 'whatsapp' },
   { key: 'contacts', label: 'جهات الاتصال', icon: IconUsers, main: 'whatsapp', sub: 'contacts', section: 'whatsapp' },
   { key: 'media', label: 'الوسائط', icon: IconDoc, main: 'whatsapp', sub: 'media', section: 'whatsapp' },
@@ -84,11 +119,16 @@ const TOP_TABS: TopTab[] = [
   { key: 'audit', label: 'التدقيق', icon: IconReport, main: 'audit', section: 'audit' },
   { key: 'users', label: 'المستخدمون والأدوار', icon: IconUsers, main: 'users', sub: 'list', section: 'users' },
   { key: 'linking', label: 'الربط والإعداد', icon: IconLink, main: 'whatsapp', sub: 'connection', section: 'whatsapp' },
+  { key: 'ai', label: 'مساعد ذكي', icon: IconWorkflow, main: 'ai', sub: 'dashboard', section: 'automation' },
+  { key: 'team', label: 'الفريق', icon: IconUsers, main: 'team', sub: 'performance', section: 'users' },
+  { key: 'tickets', label: 'تذاكري', icon: IconInbox, main: 'tickets', section: 'tasks' },
+  { key: 'feedback', label: 'ملاحظات', icon: IconChat, main: 'feedback', section: 'audit' },
   { key: 'settings', label: 'إعدادات النظام', icon: IconSettings, main: 'settings', sub: 'system', section: 'settings' },
 ];
 function activeTopKey(main: MainTab, sub: string): string {
   if (main === 'contracts' && sub === 'tasks') return 'tasks';
   if (main === 'contracts') return 'contracts';
+  if (main === 'whatsapp' && sub === 'designer') return 'designer';
   if (main === 'whatsapp' && sub === 'templates') return 'templates';
   if (main === 'whatsapp' && sub === 'contacts') return 'contacts';
   if (main === 'whatsapp' && sub === 'media') return 'media';
@@ -212,7 +252,7 @@ export default function App() {
   const subDef = nav.subs.find((s) => s.id === sub);
   const subAllowed = !subDef || (!subDef.section || hasSection(me, subDef.section)) && (!subDef.action || hasAction(me, nav.section, subDef.action));
   const forbidden = !mainAllowed || !subAllowed;
-  const unread = data.conversations.reduce((s, c) => s + (c.unread_count || 0), 0);
+  const unread = data.conversations.filter((c) => !c.is_demo).reduce((s, c) => s + (c.unread_count || 0), 0);
   const activeSubs = nav.subs.filter((s) => (!s.section || hasSection(me, s.section)) && (!s.action || hasAction(me, nav.section, s.action)));
   const topKey = activeTopKey(main, sub);
   const visibleTopTabs = TOP_TABS.filter((t) => hasSection(me, t.section));
@@ -228,7 +268,7 @@ export default function App() {
       </div>
       <div className="top-status">
         {data.killSwitch && <span className="pill danger">الأتمتة موقوفة</span>}
-        {unread > 0 && <button className="pill" onClick={() => go('inbox', 'conversations')}>غير مقروءة: {unread}</button>}
+        {unread > 0 && <button className="pill" onClick={() => go('inbox')}>غير مقروءة: {unread}</button>}
         <span className={`pill ${data.healthOk ? 'ok' : 'danger'}`}><span className="dot" />{data.healthOk ? 'متصل' : 'غير متصل'}</span>
       </div>
     </header>
@@ -250,26 +290,49 @@ export default function App() {
       <Sidebar me={me} main={main as SideTab} visible={visibleNav.map((n) => n.id as SideTab)}
         unread={unread} openTasks={openTasks} collapsed={sideCollapsed}
         onToggleCollapse={toggleSideCollapsed} go={(m) => go(m)} logout={logout} />
-      <main>
-        {activeSubs.length > 0 && <div className="btn-row subnav">
+      <main className={main === 'inbox' ? 'main-inbox' : ''}>
+        {/* Round 3: NO subnav pills above the WhatsApp workspace — the
+            triptych IS the whole content area. Other sections keep theirs. */}
+        {main !== 'inbox' && activeSubs.length > 0 && <div className="btn-row subnav">
           {activeSubs.map((s) => <button key={s.id} className={`btn small ${sub === s.id ? '' : 'ghost'}`} onClick={() => go(main, s.id)}>{s.label}</button>)}
         </div>}
         {forbidden ? <NoPermission /> : <>
-          {main === 'dashboard' && <Dashboard b={data} reload={reload} onOpenDesigner={hasSection(me, 'automation') ? () => go('automation', 'designer') : undefined} />}
+          {main === 'dashboard' && <Dashboard b={data} reload={reload} onOpenDesigner={hasSection(me, 'whatsapp') ? () => go('whatsapp', 'designer') : undefined} />}
           {main === 'contracts' && sub === 'versions' && <ContractVersions b={data} />}
           {main === 'contracts' && sub === 'tasks' && <Tasks b={data} reload={reload} />}
           {main === 'contracts' && (sub === 'list' || sub === 'new') && <Contracts b={data} reload={reload} sub={sub as 'list' | 'new'} />}
-          {main === 'inbox' && <Inbox b={data} reload={reload} me={me} sub={sub as 'conversations' | 'chat' | 'assigned' | 'notes'} />}
+          {main === 'inbox' && <Inbox b={data} reload={reload} me={me} />}
+          {main === 'whatsapp' && sub === 'overview' && <WhatsAppOverview b={data} reload={reload} />}
+          {main === 'whatsapp' && sub === 'insights' && <WhatsAppInsights b={data} />}
+          {main === 'whatsapp' && sub === 'conversions' && <WhatsAppConversions b={data} />}
+          {main === 'whatsapp' && sub === 'lists' && <ContactLists reload={reload} />}
+          {main === 'whatsapp' && sub === 'segments' && <SegmentsPage />}
+          {main === 'whatsapp' && sub === 'tags' && <TagsPage b={data} reload={reload} />}
+          {main === 'whatsapp' && sub === 'auto-replies' && <AutoReplies b={data} onOpenDesigner={() => go('whatsapp', 'designer')} />}
+          {main === 'whatsapp' && sub === 'designer' && <WorkflowDesigner workflows={data.workflows} templates={data.templates} reload={reload} />}
+          {main === 'whatsapp' && sub === 'user-input' && <UserInputResponses b={data} />}
+          {main === 'whatsapp' && sub === 'handoff' && <HandoffPage b={data} reload={reload} />}
           {main === 'whatsapp' && sub === 'templates' && <Templates b={data} reload={reload} canEdit={hasAction(me, 'whatsapp', 'edit')} />}
+          {main === 'whatsapp' && sub === 'chat-widget' && <ChatWidgetPage />}
           {main === 'whatsapp' && sub === 'contacts' && <Contacts b={data} reload={reload} me={me} />}
           {main === 'whatsapp' && sub === 'media' && <WhatsAppMedia b={data} reload={reload} me={me} />}
           {main === 'whatsapp' && (sub === 'connection' || sub === 'settings') && <WhatsApp b={data} reload={reload} me={me} sub={sub as 'connection' | 'settings'} />}
-          {main === 'automation' && sub === 'designer' && <WorkflowDesigner workflows={data.workflows} templates={data.templates} reload={reload} />}
           {main === 'automation' && sub === 'rules' && <Automation b={data} reload={reload} only="rules" />}
           {main === 'automation' && sub === 'killswitch' && <Automation b={data} reload={reload} only="killswitch" />}
+          {main === 'ai' && <AIWorkspace b={data} sub={sub} />}
+          {main === 'team' && sub === 'members' && <Users b={data} reload={reload} me={me} sub="list" />}
+          {main === 'team' && sub === 'performance' && <TeamPerformance b={data} />}
+          {main === 'team' && sub === 'distribution' && <Distribution b={data} reload={reload} />}
+          {main === 'team' && sub === 'qa' && <QASettings />}
+          {main === 'tickets' && <MyTickets b={data} reload={reload} me={me} />}
+          {main === 'feedback' && <FeedbackPage />}
           {main === 'users' && <Users b={data} reload={reload} me={me} sub={sub as 'list' | 'add' | 'passwords' | 'permissions' | 'departments'} />}
           {main === 'audit' && <Audit b={data} />}
           {main === 'settings' && sub === 'system' && <SystemSettings />}
+          {main === 'settings' && sub === 'billing' && <BillingPage b={data} />}
+          {main === 'settings' && sub === 'webhook' && <WebhookPage />}
+          {main === 'settings' && sub === 'api' && <ApiPage />}
+          {main === 'settings' && sub === 'integrations' && <IntegrationsPage b={data} />}
         </>}
       </main>
     </div>

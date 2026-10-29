@@ -32,6 +32,7 @@ const { BANNED_STEP_TYPES, AUTOMATION_MAX_STEPS_PER_RUN, AUTOMATION_COOLDOWN_MS,
 const { validContactPhone, parseContactLabels, parseCsv, csvEscape } = require('./contacts');
 const { UPLOAD_MAX_BYTES, UPLOAD_ALLOWED, sanitizeFilename, publicUpload } = require('./media');
 const { metaConfig, embeddedLaunchParams, metaErrorInfo, safeEqualStr, metaRequest } = require('./meta');
+const { buildPdf } = require('./pdf');
 
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'data.json');
@@ -1569,6 +1570,73 @@ const server = http.createServer(async (req, res) => {
       db.tasks.push({ id: nextId(), contract_id: id, title: 'مراجعة العقد وإصداره', type: 'review', status: 'open', assigned_to: null, created_at: new Date().toISOString() });
       audit(actor, 'contract', id, 'created', { code: c.code }); return send(res, 201, c, p);
     }
+    // ---- Contract PDF (Round 3, expanded brief): a formatted Arabic RTL
+    // PDF presentation of the LOCKED contract record — never an editable
+    // replacement. Generated server-side with an embedded font (pdf.js),
+    // so it works on Render too. No new dependency.
+    const contractPdfMatch = p.match(/^\/api\/contracts\/(\d+)\/pdf$/);
+    if (contractPdfMatch && req.method === 'GET') {
+      if (!can(user, 'contracts', 'view')) return forbidden();
+      const c = db.contracts.find((x) => x.id === Number(contractPdfMatch[1]));
+      if (!c) return send(res, 404, { error: 'contract not found' }, p);
+      const STATE_AR = { draft: 'مسودة', issued: 'صادر بانتظار القبول', accepted: 'مقبول من الطرفين', payment_pending: 'بانتظار تأكيد المؤسسة المالية', payment_confirmed: 'مؤكد مالياً بمرجع مؤسسة', preparing: 'قيد التجهيز', delivered: 'مسلّم بانتظار تأكيد الاستلام', completed: 'مكتمل ومغلق', disputed: 'نزاع مفتوح', refund_pending: 'استرداد بانتظار تنفيذ يدوي خارج النظام', refunded: 'مسترد', cancelled: 'ملغى' };
+      const auditLines = db.audit.filter((a) => a.entity === 'contract' && a.entity_id === c.id).slice(-10);
+      const files = db.contract_files.filter((f) => f.contract_id === c.id);
+      const lines = [
+        { text: 'عقد ضمان — Pilot System', size: 20, align: 'center', blankAfter: true },
+      ];
+      if (c.is_demo) lines.push({ text: 'تجريبي — ليس عقداً حقيقياً', size: 14, align: 'center', blankAfter: true });
+      lines.push(
+        { text: `رقم العقد: ${c.code}`, size: 14, blankAfter: true },
+        { text: `الحالة: ${STATE_AR[c.state] || c.state}`, size: 14 },
+        { text: `المشتري: ${c.buyer_phone}`, size: 14 },
+        { text: `البائع: ${c.seller_phone}`, size: 14 },
+        { text: `المنتج: ${c.product_description}`, size: 14 },
+        { text: `المبلغ: ${c.amount} ${c.currency}`, size: 14 },
+        { text: `نقطة التسليم: ${c.delivery_point || 'غير محددة'}`, size: 14 },
+        { text: 'نافذة القبول: غير مسجلة كحقل مستقل في سجل العقد — تحددها بنود الاتفاق المتفق عليها خارج النظام', size: 12 },
+        { text: `تاريخ الإنشاء: ${String(c.created_at).slice(0, 10)}`, size: 14 },
+        { text: `إصدار العقد: v${c.version || 1}`, size: 14, blankAfter: true },
+        { text: `بصمة البنود (SHA-256): ${c.clause_fingerprint}`, size: 11, blankAfter: true },
+        { text: 'النسخ الموقعة المسجلة:', size: 14 },
+      );
+      if (!files.length) lines.push({ text: 'لا نسخ موقعة مسجلة لهذا العقد بعد.', size: 12 });
+      else for (const f of files) lines.push({ text: `${f.filename} — ${f.kind}`, size: 12 });
+      lines.push({ text: 'ملخص سجل التدقيق:', size: 14, blankAfter: false });
+      if (!auditLines.length) lines.push({ text: 'لا أحداث تدقيق لهذا العقد بعد.', size: 12 });
+      else for (const a of auditLines) lines.push({ text: `${String(a.created_at).slice(0, 10)} ${String(a.created_at).slice(11, 16)} — ${a.actor}: ${a.action}${a.details && a.details.to ? ' ← ' + (STATE_AR[String(a.details.to)] || String(a.details.to)) : ''}${a.details && a.details.financial_reference ? ' (مرجع: ' + String(a.details.financial_reference) + ')' : ''}`, size: 11 });
+      lines.push({ text: 'هذا المستند عرض لسجل العقد المقفل في النظام، وليس بديلاً قابلاً للتعديل عنه. أي تنفيذ مالي يتم يدوياً خارج النظام عبر المؤسسة المالية الخارجية.', size: 11, blankAfter: false });
+      let pdf;
+      try { pdf = buildPdf(lines); } catch (e) { return send(res, 500, { error: 'pdf generation failed: ' + e.message }, p); }
+      res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="contract-${c.code}.pdf"`, ...securityHeaders(p) });
+      return res.end(pdf);
+    }
+    // ---- Demo contract (Round 3, expanded brief): ONE clearly-labelled
+    // test contract so the whole system can be judged end-to-end before
+    // Meta linking. Excluded from real reports, deleted by one button.
+    if (p === '/api/demo-contract' && req.method === 'POST') {
+      if (!can(user, 'contracts', 'create')) return forbidden();
+      const existing = db.contracts.find((x) => x.is_demo);
+      if (existing) return send(res, 200, { ok: true, already: true, contract: existing }, p);
+      const id = nextId();
+      const c = { id, code: contractCode(id), buyer_phone: '+967700000001', seller_phone: '+967700000002', product_description: 'تجريبي — منتج تجريبي للعرض فقط', amount: 100, currency: 'SAR', delivery_point: 'تجريبي — نقطة عرض فقط', state: 'draft', version: 1, is_demo: true, clause_fingerprint: sha256('demo-contract' + id), created_at: new Date().toISOString() };
+      db.contracts.push(c);
+      db.contract_versions.push({ id: nextId(), contract_id: id, version: 1, snapshot: { buyer_phone: c.buyer_phone, seller_phone: c.seller_phone, product_description: c.product_description, amount: c.amount, currency: c.currency, delivery_point: c.delivery_point }, clause_fingerprint: c.clause_fingerprint, is_locked: false, created_at: c.created_at });
+      ['buyer', 'seller'].forEach((party) => db.conversations.push({ id: nextId(), contract_id: id, party, status: 'new', unread_count: 0, assigned_to: null }));
+      audit(actor, 'contract', id, 'demo_contract_created', { code: c.code }); save();
+      return send(res, 201, { ok: true, already: false, contract: c }, p);
+    }
+    if (p === '/api/demo-contract' && req.method === 'DELETE') {
+      if (!can(user, 'contracts', 'create')) return forbidden();
+      const ids = db.contracts.filter((x) => x.is_demo).map((x) => x.id);
+      const convIds = db.conversations.filter((x) => ids.includes(x.contract_id)).map((x) => x.id);
+      db.messages = db.messages.filter((m) => !convIds.includes(m.conversation_id));
+      db.conversations = db.conversations.filter((x) => !ids.includes(x.contract_id));
+      db.contract_versions = db.contract_versions.filter((v) => !ids.includes(v.contract_id));
+      db.contracts = db.contracts.filter((x) => !x.is_demo);
+      audit(actor, 'contract', 0, 'demo_contract_deleted', { contracts: ids.length }); save();
+      return send(res, 200, { ok: true, contracts_deleted: ids.length }, p);
+    }
     const contractMatch = p.match(/^\/api\/contracts\/(\d+)\/transition$/);
     if (contractMatch && req.method === 'POST') {
       const c = db.contracts.find((x) => x.id === Number(contractMatch[1]));
@@ -1638,6 +1706,38 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, c, p);
     }
 
+    // ---- Demo conversation (Round 3): ONE clearly-labelled test thread so
+    // the triptych shape can be judged BEFORE Meta linking. It is never a
+    // real client (no phone number, no contract), never sent to Meta, and
+    // never counted in reports (see /api/reports/summary). One-button
+    // DELETE removes the conversation and all its messages.
+    if (p === '/api/demo-conversation' && req.method === 'POST') {
+      if (!can(user, 'inbox', 'edit')) return forbidden();
+      const existing = db.conversations.find((c) => c.is_demo);
+      if (existing) return send(res, 200, { ok: true, already: true, conversation: existing, messages: db.messages.filter((m) => m.conversation_id === existing.id).sort((a, b) => a.id - b.id) }, p);
+      const now = new Date();
+      const day = (d, h, mi) => { const t = new Date(d); t.setHours(h, mi, 0, 0); return t.toISOString(); };
+      const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+      const conv = { id: nextId(), contract_id: null, party: 'general', phone: null, display_name: 'عميل تجريبي', is_demo: true, status: 'open', unread_count: 0, assigned_to: null, labels: ['تجريبي'], pinned: false, last_inbound_at: day(now, 9, 5) };
+      db.conversations.push(conv);
+      const mk = (direction, body, extra) => { const m = { id: nextId(), conversation_id: conv.id, direction, sender_name: direction === 'in' ? 'عميل تجريبي' : 'فريق Pilot System', body: body || null, template_name: null, is_internal_note: false, is_demo: true, reply_to_id: null, meta_status: null, created_at: day(now, 9, 0), ...extra }; db.messages.push(m); return m; };
+      mk('in', 'مرحباً، هل العقد جاهز للتوقيع؟', { created_at: day(yesterday, 10, 15) });
+      mk('out', 'أهلاً بك، نعم العقد جاهز وسنرسل لك التفاصيل قبل التوقيع.', { created_at: day(yesterday, 10, 22), meta_status: 'read' });
+      mk('in', 'صورة المنتج قبل التغليف', { created_at: day(now, 9, 5), media_type: 'image', media_filename: 'صورة المنتج التجريبي.jpg', media_caption: 'صورة المنتج قبل التغليف' });
+      mk('out', 'تم قبول العقد — اضغط للتأكيد أو لطلب تعديل.', { created_at: day(now, 9, 6), template_name: 'contract_accepted', buttons: ['تأكيد العقد', 'اطلب تعديلاً'], meta_status: 'delivered' });
+      mk('out', 'ملاحظة فريق: تحقق من هوية العميل قبل إرسال العقد النهائي.', { created_at: day(now, 9, 10), is_internal_note: true });
+      audit(actor, 'conversation', conv.id, 'demo_conversation_created'); save();
+      return send(res, 201, { ok: true, already: false, conversation: conv, messages: db.messages.filter((m) => m.conversation_id === conv.id).sort((a, b) => a.id - b.id) }, p);
+    }
+    if (p === '/api/demo-conversation' && req.method === 'DELETE') {
+      if (!can(user, 'inbox', 'edit')) return forbidden();
+      const ids = db.conversations.filter((c) => c.is_demo).map((c) => c.id);
+      const beforeMsgs = db.messages.length;
+      db.messages = db.messages.filter((m) => !ids.includes(m.conversation_id));
+      db.conversations = db.conversations.filter((c) => !c.is_demo);
+      audit(actor, 'conversation', 0, 'demo_conversation_deleted', { conversations: ids.length, messages: beforeMsgs - db.messages.length }); save();
+      return send(res, 200, { ok: true, conversations_deleted: ids.length, messages_deleted: beforeMsgs - db.messages.length }, p);
+    }
     // ---- Inbox: conversations & messages ----
     if (p === '/api/conversations' && req.method === 'GET') {
       if (!can(user, 'inbox', 'view')) return forbidden();
@@ -1661,7 +1761,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/inbox/unread-counts' && req.method === 'GET') {
       if (!can(user, 'inbox', 'view')) return forbidden();
-      const byConversation = db.conversations.map((c) => ({ conversation_id: c.id, contract_id: c.contract_id, party: c.party, status: c.status, unread_count: c.unread_count || 0 }));
+      const byConversation = db.conversations.filter((c) => !c.is_demo).map((c) => ({ conversation_id: c.id, contract_id: c.contract_id, party: c.party, status: c.status, unread_count: c.unread_count || 0 }));
       const total = byConversation.reduce((s, c) => s + c.unread_count, 0);
       const byStatus = {};
       for (const c of byConversation) byStatus[c.status] = (byStatus[c.status] || 0) + c.unread_count;
@@ -1715,7 +1815,7 @@ const server = http.createServer(async (req, res) => {
       const conv = db.conversations.find((x) => x.id === Number(convReplyMatch[1]));
       if (!conv) return send(res, 404, { error: 'conversation not found' }, p);
       if (!body.body && !body.template_name) return send(res, 400, { error: 'body or template_name is required for a reply' }, p);
-      const m = { id: nextId(), conversation_id: conv.id, direction: 'out', sender_name: body.sender_name || actor, body: body.body || null, template_name: body.template_name || null, is_internal_note: !!body.is_internal_note, reply_to_id: body.reply_to_id || null, created_at: new Date().toISOString() };
+      const m = { id: nextId(), conversation_id: conv.id, direction: 'out', sender_name: body.sender_name || actor, body: body.body || null, template_name: body.template_name || null, is_internal_note: !!body.is_internal_note, is_demo: !!body.is_demo || !!conv.is_demo, reply_to_id: body.reply_to_id || null, buttons: Array.isArray(body.buttons) ? body.buttons : undefined, created_at: new Date().toISOString() };
       db.messages.push(m); audit(actor, 'message', m.id, 'sent'); return send(res, 201, m, p);
     }
     const customerMessagesMatch = p.match(/^\/api\/customer\/conversations\/(\d+)\/messages$/);
@@ -1739,7 +1839,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/messages' && req.method === 'POST') {
       if (!can(user, 'inbox', 'create')) return forbidden();
       if (!body.body && !body.template_name) return send(res, 400, { error: 'body or template_name is required' }, p);
-      const m = { id: nextId(), conversation_id: body.conversation_id || null, direction: body.direction || 'out', sender_name: body.sender_name || actor, body: body.body || null, template_name: body.template_name || null, is_internal_note: !!body.is_internal_note, reply_to_id: body.reply_to_id || null, created_at: new Date().toISOString() };
+      const m = { id: nextId(), conversation_id: body.conversation_id || null, direction: body.direction || 'out', sender_name: body.sender_name || actor, body: body.body || null, template_name: body.template_name || null, is_internal_note: !!body.is_internal_note, is_demo: !!body.is_demo, reply_to_id: body.reply_to_id || null, buttons: Array.isArray(body.buttons) ? body.buttons : undefined, created_at: new Date().toISOString() };
       db.messages.push(m);
       if (m.direction === 'in' && !m.is_internal_note && m.conversation_id) bumpUnread(m.conversation_id);
       audit(actor, 'message', m.id, 'sent'); return send(res, 201, m, p);
@@ -2165,10 +2265,10 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/reports/summary' && req.method === 'GET') {
       if (!can(user, 'dashboard', 'view')) return forbidden();
       const byState = {};
-      for (const st of STATES) byState[st] = db.contracts.filter((c) => c.state === st).length;
-      const unreadTotal = db.conversations.reduce((s, c) => s + (c.unread_count || 0), 0);
+      for (const st of STATES) byState[st] = db.contracts.filter((c) => !c.is_demo && c.state === st).length;
+      const unreadTotal = db.conversations.filter((c) => !c.is_demo).reduce((s, c) => s + (c.unread_count || 0), 0);
       const frtMinutes = [];
-      for (const conv of db.conversations) {
+      for (const conv of db.conversations.filter((c) => !c.is_demo)) {
         const msgs = db.messages.filter((m) => m.conversation_id === conv.id && !m.is_internal_note).sort((a, b) => a.id - b.id);
         const firstIn = msgs.find((m) => m.direction === 'in');
         if (!firstIn) continue;
@@ -2182,9 +2282,9 @@ const server = http.createServer(async (req, res) => {
       for (const l of db.automation_logs) logByOutcome[l.outcome] = (logByOutcome[l.outcome] || 0) + 1;
       return send(res, 200, {
         generated_at: new Date().toISOString(),
-        contracts_total: db.contracts.length,
+        contracts_total: db.contracts.filter((c) => !c.is_demo).length,
         contracts_by_state: byState,
-        conversations_total: db.conversations.length,
+        conversations_total: db.conversations.filter((c) => !c.is_demo).length,
         unread_total: unreadTotal,
         open_tasks: db.tasks.filter((t) => t.status === 'open').length,
         templates_total: db.templates.length,

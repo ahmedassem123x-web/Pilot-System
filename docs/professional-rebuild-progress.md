@@ -78,3 +78,32 @@ No wallets, no marketplace/catalog, no bank API, FI manual + reference required,
 - Serve check: GET / 200, GET /health 200 with all 12 states, unauthenticated GET /api/contracts 401, unauthenticated GET /api/whatsapp/linking 401.
 - Clean after checks: no backend/src/data.json, no backend/uploads/ left; secrets grep returned only env-var names and the word 'ask-question' as false positives.
 - NOT pushed: all changes below remain uncommitted in ~/workspace/pilot-system-standalone/ only; live Render site still serves commit 6e80fff4 until the parent pushes.
+
+## Round 3, expanded brief — integrated MazBot-adapted version (unpushed)
+- New component `frontend/src/mazbot-sections.tsx`: WhatsApp Overview /
+  Insights / Conversions-as-contract-funnel / Contact Lists / Segments /
+  Tags / Auto Replies / User Input Responses / Human handoff / Chat Widget
+  (config page only, localStorage, no customer website); AI workspace
+  (Dashboard / Credits / Settings / Agents / Test Chat / Quotas /
+  Triggers / Business Hours / Knowledge Base) as a draft-only assistant
+  with a daily draft quota and a locked draft-only mode — no auto-send,
+  no selling, no closing; Team Performance / Distribution (least-loaded
+  assignment, audited) / QA Settings (money and template gates locked);
+  My Tickets (tasks assigned to the signed-in operator); Ideas & Feedback
+  (local); Billing (usage display only, no payment collection); Webhook
+  (live linking flags, no secret values); API (endpoint catalogue, no
+  keys); Integrations (real statuses only, PostgreSQL honestly "pending").
+- Navigation: WhatsApp subs expanded to the full adapted hierarchy;
+  Flow Builder moved under WhatsApp (one entry only — removed from
+  Automation subs); new top-level sections AI (gated by automation
+  permission), Team (users), Tickets (tasks), Feedback (audit); Settings
+  subs expanded (general / billing / webhook / api / integrations).
+  Phone top tabs and sidebar groups updated to match. Nav dedupe kept:
+  one entry per screen.
+- Menu map: `docs/mazbot-menu-map.md` records adopt / adapt / reject
+  per MazBot item with a reason for every rejection (Campaigns and
+  Invite & earn rejected; AI adapted to draft-only; Billing to display
+  only; Chat Widget to config only; Lead Distribution to assignment).
+- Rejected and absent by design: campaigns, invite & earn, store sync /
+  catalog, marketing templates, broadcast endpoint (404), AI selling /
+  closing, in-chat payments, WhatsApp Web QR, customer website.

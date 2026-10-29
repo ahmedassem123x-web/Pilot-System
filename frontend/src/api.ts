@@ -188,7 +188,16 @@ export const api = {
   replyConversation: (id: number, b: { body?: string; template_name?: string | null; is_internal_note?: boolean; sender_name?: string }) =>
     req<Message>(`/api/conversations/${id}/reply`, { method: 'POST', body: JSON.stringify(b) }),
   messages: () => req<Message[]>('/api/messages'),
-  sendMessage: (b: { conversation_id: number; direction: string; sender_name: string; body: string; template_name?: string | null; is_internal_note: boolean; reply_to_id?: number | null }) =>
+  createDemoConversation: () =>
+    req<{ ok: boolean; already: boolean; conversation: Conversation; messages: Message[] }>('/api/demo-conversation', { method: 'POST', body: JSON.stringify({}) }),
+  createDemoContract: () =>
+    req<{ ok: boolean; already: boolean; contract: Contract }>('/api/demo-contract', { method: 'POST', body: JSON.stringify({}) }),
+  deleteDemoContract: () =>
+    req<{ ok: boolean; contracts_deleted: number }>('/api/demo-contract', { method: 'DELETE' }),
+  downloadContractPdf: (id: number) => reqBlob(`/api/contracts/${id}/pdf`),
+  deleteDemoConversation: () =>
+    req<{ ok: boolean; conversations_deleted: number; messages_deleted: number }>('/api/demo-conversation', { method: 'DELETE' }),
+  sendMessage: (b: { conversation_id: number; direction: string; sender_name: string; body: string; template_name?: string | null; is_internal_note: boolean; is_demo?: boolean; reply_to_id?: number | null }) =>
     req<Message>('/api/messages', { method: 'POST', body: JSON.stringify(b) }),
   tasks: () => req<Task[]>('/api/tasks'),
   taskAction: (id: number, action: 'complete' | 'cancel') =>
