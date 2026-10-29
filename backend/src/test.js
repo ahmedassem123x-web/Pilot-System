@@ -840,6 +840,14 @@ server.listen(PORT, async () => {
     const mapDoc = fs.readFileSync(path.join(__dirname, '..', '..', 'docs', 'mazbot-menu-map.md'), 'utf8');
     check('expanded menu map records Campaigns and Invite & earn as rejected with reasons', mapDoc.includes('Campaigns — REJECTED') && mapDoc.includes('Invite & earn — REJECTED'), 'menu map');
     check('expanded nav: whatsapp subs include overview and designer, automation has no designer sub', appSrc.includes("id: 'overview'") && appSrc.includes("id: 'designer', label: 'منشئ التدفقات'") && !appSrc.includes("id: 'automation', label: 'الأتمتة', section: 'automation', icon: IconBolt, subs: [\n    { id: 'rules', label: 'القواعد' },\n    { id: 'designer'"), 'nav dedupe');
+    // Dedupe fix (2026-10-30): the pill row is DELETED globally. Proof:
+    // zero occurrences of the word in App.tsx/styles.css/sidebar.tsx,
+    // one phone dropdown (section-select) + expanded sidebar subs only.
+    const sideSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'src', 'sidebar.tsx'), 'utf8');
+    const cssSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'frontend', 'src', 'styles.css'), 'utf8');
+    const noPillRow = !/subnav/.test(appSrc) && !/subnav/.test(cssSrc) && !/subnav/.test(sideSrc) && !appSrc.includes('btn-row subnav');
+    const oneSectionControl = appSrc.includes('className="section-select"') && appSrc.includes('قسم {nav.label}') && sideSrc.includes('side-subs') && cssSrc.includes('.section-select{display:flex}');
+    check('dedupe fix: pill row gone everywhere, one section control only (sidebar subs + phone dropdown)', noPillRow && oneSectionControl, 'pill row deleted');
 
     mockServer.close();
 

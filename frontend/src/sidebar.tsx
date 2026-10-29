@@ -37,6 +37,11 @@ interface SidebarProps {
   unread: number; openTasks: number;
   collapsed: boolean; onToggleCollapse: () => void;
   go: (m: MainTab) => void; logout: () => void;
+  // Subsections of the ACTIVE main tab only, permission-gated by App.
+  // This is the ONE place subsections appear on web — the deleted pill
+  // row never reappears. Collapsed rail hides them (main icons only).
+  subs?: { id: string; label: string }[]; sub?: string;
+  onGoSub?: (id: string) => void;
 }
 
 /**
@@ -46,7 +51,7 @@ interface SidebarProps {
  * solid-teal active pill + inline-start accent bar, hover wash,
  * icon-only collapsed rail (76px) with native tooltips, user footer.
  */
-export function Sidebar({ me, main, visible, unread, openTasks, collapsed, onToggleCollapse, go, logout }: SidebarProps) {
+export function Sidebar({ me, main, visible, unread, openTasks, collapsed, onToggleCollapse, go, logout, subs = [], sub = '', onGoSub }: SidebarProps) {
   const badgeFor = (id: MainTab): number => (id === 'inbox' ? unread : id === 'contracts' ? openTasks : 0);
   return (
     <aside className={`sidebar ${collapsed ? 'collapsed' : ''}`} aria-label="القائمة الجانبية">
@@ -75,13 +80,25 @@ export function Sidebar({ me, main, visible, unread, openTasks, collapsed, onTog
                 const badge = badgeFor(id);
                 const active = main === id;
                 return (
-                  <button key={id} type="button" title={n.label} aria-label={n.label} aria-current={active ? 'page' : undefined}
-                    className={`side-link ${active ? 'active' : ''}`} onClick={() => go(id)}>
-                    <span className="side-link-icon"><Icon /></span>
-                    {!collapsed && <span className="side-link-label">{n.label}</span>}
-                    {!collapsed && badge > 0 && <span className="side-unread">{badge}</span>}
-                    {collapsed && badge > 0 && <span className="side-unread-dot" aria-label={`${badge} جديد`} />}
-                  </button>
+                  <div key={id}>
+                    <button type="button" title={n.label} aria-label={n.label} aria-current={active ? 'page' : undefined}
+                      className={`side-link ${active ? 'active' : ''}`} onClick={() => go(id)}>
+                      <span className="side-link-icon"><Icon /></span>
+                      {!collapsed && <span className="side-link-label">{n.label}</span>}
+                      {!collapsed && badge > 0 && <span className="side-unread">{badge}</span>}
+                      {collapsed && badge > 0 && <span className="side-unread-dot" aria-label={`${badge} جديد`} />}
+                    </button>
+                    {active && !collapsed && subs.length > 0 && (
+                      <div className="side-subs" role="list" aria-label={`أقسام ${n.label}`}>
+                        {subs.map((s) => (
+                          <button key={s.id} type="button" role="listitem" aria-current={sub === s.id ? 'page' : undefined}
+                            className={`side-sub ${sub === s.id ? 'active' : ''}`} onClick={() => onGoSub?.(s.id)}>
+                            {s.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 );
               })}
             </div>

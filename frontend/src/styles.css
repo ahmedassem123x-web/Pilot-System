@@ -160,8 +160,15 @@ main{flex:1;padding:22px;min-width:0}
 .card h2{font-size:var(--fs-card)}
 .card h3{font-size:var(--fs-section)}
 .page-head .btn-row{margin:0}
-.subnav{background:#fff;border:1px solid var(--line);border-radius:var(--radius);padding:10px;box-shadow:var(--shadow);margin-bottom:16px;position:sticky;top:72px;z-index:20}
-.subnav .btn{border-radius:99px}
+/* Dedupe fix: no pill row exists anywhere in the app. The single
+   section control is .section-select (phone only) + expanded sidebar
+   subs on web. */
+.section-select{display:none;align-items:center;gap:10px;margin-bottom:16px;font-weight:800;font-size:14px}
+.section-select select{flex:1;min-width:0;min-height:44px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;font-weight:700}
+.side-subs{display:flex;flex-direction:column;gap:2px;margin:4px 0 10px;padding-inline-start:38px}
+.side-sub{border:0;background:transparent;color:var(--muted);text-align:start;padding:8px 10px;border-radius:8px;cursor:pointer;font-weight:700;font-size:13.5px}
+.side-sub:hover{background:#e6f4f1;color:var(--ink)}
+.side-sub.active{background:var(--teal-soft);color:var(--teal-dark);box-shadow:inset 3px 0 0 var(--teal-bright)}
 .btn{background:var(--teal);color:#fff;border:0;padding:10px 18px;border-radius:10px;cursor:pointer;font-weight:700;box-shadow:0 2px 8px rgba(15,118,110,.3);transition:filter .15s,transform .1s,box-shadow .15s;display:inline-flex;align-items:center;gap:7px}
 .btn:hover{filter:brightness(1.08);box-shadow:var(--shadow-lift)}
 .btn:active{transform:translateY(1px)}
@@ -269,9 +276,9 @@ code{word-break:break-all;background:#f1f5f9;padding:2px 6px;border-radius:5px;f
 @media(max-width:1024px){
   .stats{grid-template-columns:repeat(2,1fr)}
   .inbox-layout,.preview-wrap{grid-template-columns:1fr}
-  .subnav{position:static}
 }
 @media(max-width:819px){
+  .section-select{display:flex}
   .topnav{display:flex}
   .sidebar{display:none !important}
   .layout{display:block;min-height:0}

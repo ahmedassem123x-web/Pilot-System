@@ -1,5 +1,45 @@
 # Continuation Checkpoint — Pilot System
 
+## Dedupe fix for real (2026-10-30, NOT pushed yet — local only)
+- The previous round's claim was WRONG: `App.tsx` line 279 still rendered a
+  pill row (`btn-row subnav`) for every non-inbox page, and the user's live
+  screenshot of WhatsApp Overview proved it (top main tabs PLUS a pill row
+  with all 16 WhatsApp sections). This fix deletes it globally.
+- DELETED: the pill row JSX in `frontend/src/App.tsx`, the `.subnav` CSS
+  rules in `frontend/src/styles.css` (including the 1024px override).
+  Grep proof: `grep -rn "subnav" frontend/src/` returns 0 occurrences
+  (source only; the rebuilt bundle also contains 0), and the new backend
+  test below enforces it.
+- REPLACED by ONE navigation source only:
+  - Web (≥820px): the sidebar, now with EXPANDED subsections under the
+    active main tab only (`side-subs` in `frontend/src/sidebar.tsx`,
+    permission-gated by App via `activeSubs`, hidden when collapsed).
+  - Phone (<820px): ONE compact dropdown at the top of page content,
+    `section-select` labelled "قسم {main label}" (e.g. "قسم واتساب"),
+    CSS-hidden on desktop, 44px select. No pill row, no second tab row.
+  - No separate section-link list was added on overview pages: that would
+    be a THIRD appearance of the same labels (sidebar + list), i.e. the
+    exact duplication the user complained about. Sidebar (web) +
+    dropdown (phone) is the single source.
+- All 16 WhatsApp sections remain reachable (overview, insights,
+  conversions, lists, segments, tags, contacts, auto-replies, designer,
+  user-input, handoff, templates, chat-widget, connection, media,
+  settings), plus all other mains' subs, with identical permission gating.
+  No route or permission changed. Triptych, composer buttons, 7-step
+  wizard, and 4 PDF types are untouched.
+- Tests: 247/247 twice (was 246; +1 new check "dedupe fix: pill row gone
+  everywhere, one section control only"). TypeScript clean, Vite build
+  succeeds, rebuilt `frontend/index.html` (488.13 kB, contains
+  section-select/side-sub, 0× subnav). Serve: GET / 200, /health 200 with
+  all 12 states, unauthenticated /api/contracts 401, /api/whatsapp/linking
+  401. Test data/uploads deleted, secrets grep clean (no credential values).
+  Breakpoints (code-checked, not live-device): 390px dropdown + scrolling
+  tabs + tables inside cards, no overflow; 820px sidebar appears, dropdown
+  hidden, expanded subs visible; 1440px full layout, collapsed rail hides
+  subs. Real-device test by the user remains decisive.
+- Files changed this fix: `frontend/src/App.tsx`, `frontend/src/sidebar.tsx`,
+  `frontend/src/styles.css`, `frontend/index.html`, `backend/src/test.js`.
+
 ## Last completed work (NOT pushed yet — local only)
 - Date: 2026-10-30 (continuation round, after commit 9171d177).
 - Continuation prompt stages §3–§12 executed locally in `~/workspace/pilot-system-standalone/`:

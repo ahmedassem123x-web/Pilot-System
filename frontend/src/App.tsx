@@ -118,7 +118,8 @@ const TOP_TABS: TopTab[] = [
 ];
 function activeTopKey(main: MainTab, _sub: string): string {
   // Phone tabs are MAIN tabs only (dedupe fix): subsections are reached
-  // once, via the single subnav row below — never as extra phone tabs.
+  // once, via the expanded sidebar on web and the single section dropdown
+  // on phone — never as extra phone tabs and never as a pill row.
   return main;
 }
 
@@ -272,13 +273,20 @@ export default function App() {
           the phone tabs (visibleNav). Collapsed state is frontend-only. */}
       <Sidebar me={me} main={main as SideTab} visible={visibleNav.map((n) => n.id as SideTab)}
         unread={unread} openTasks={openTasks} collapsed={sideCollapsed}
-        onToggleCollapse={toggleSideCollapsed} go={(m) => go(m)} logout={logout} />
+        onToggleCollapse={toggleSideCollapsed} go={(m) => go(m)} logout={logout}
+        subs={activeSubs.map((s) => ({ id: s.id, label: s.label }))} sub={sub}
+        onGoSub={(id) => go(main, id)} />
       <main className={main === 'inbox' ? 'main-inbox' : ''}>
-        {/* Round 3: NO subnav pills above the WhatsApp workspace — the
-            triptych IS the whole content area. Other sections keep theirs. */}
-        {main !== 'inbox' && activeSubs.length > 0 && <div className="btn-row subnav">
-          {activeSubs.map((s) => <button key={s.id} className={`btn small ${sub === s.id ? '' : 'ghost'}`} onClick={() => go(main, s.id)}>{s.label}</button>)}
-        </div>}
+        {/* Dedupe fix (2026-10-30): the pill row is DELETED globally.
+            Subsections live in exactly one place: the expanded sidebar on
+            web, and this single dropdown on phone (CSS hides it >= 820px).
+            No pill row, no second tab row, anywhere. */}
+        {activeSubs.length > 0 && <label className="section-select">
+          <span>قسم {nav.label}</span>
+          <select value={sub} onChange={(e) => go(main, e.target.value)} aria-label={`قسم ${nav.label}`}>
+            {activeSubs.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+          </select>
+        </label>}
         {forbidden ? <NoPermission /> : <>
           {main === 'dashboard' && <Dashboard b={data} reload={reload} onOpenDesigner={hasSection(me, 'whatsapp') ? () => go('whatsapp', 'designer') : undefined} />}
           {main === 'contracts' && sub === 'versions' && <ContractVersions b={data} />}
