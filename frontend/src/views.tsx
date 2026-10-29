@@ -36,14 +36,17 @@ export function Dashboard({ b, reload }: { b: Bundle; reload: () => void }) {
     const m: Record<string, number> = {}; b.contracts.forEach((c) => { m[c.state] = (m[c.state] || 0) + 1; }); return m;
   }, [b.contracts]);
   const latest = [...b.contracts].slice(-5).reverse();
+  // Every number below comes from the backend API bundle (b.*) only.
+  // When the system starts empty they read 0 — no demo number is ever shown.
+  const approvedTemplates = b.templates.filter((t) => t.approval_status === 'approved').length;
   return <>
     <div className="stats">
-      <div className="stat"><b>{b.contracts.length}</b><span>إجمالي العقود</span></div>
-      <div className="stat"><b>{b.conversations.length}</b><span>محادثات (مشتري/بائع)</span></div>
-      <div className="stat"><b>{unread}</b><span>رسائل غير مقروءة</span></div>
-      <div className="stat"><b>{openTasks}</b><span>مهام مفتوحة</span></div>
-      <div className="stat"><b>{b.templates.filter((t) => t.approval_status === 'approved').length} / {b.templates.length}</b><span>قوالب معتمدة</span></div>
-      <div className="stat danger"><b>{b.killSwitch ? 'مُفعّل' : 'متوقف'}</b><span>مفتاح إيقاف الأتمتة</span></div>
+      <div className="stat"><span className="stat-icon">📄</span><b>{b.contracts.length}</b><span className="stat-label">إجمالي العقود</span><span className="stat-sub">جميع الحالات — من الخادم</span></div>
+      <div className="stat"><span className="stat-icon">💬</span><b>{b.conversations.length}</b><span className="stat-label">محادثات</span><span className="stat-sub">محادثة مستقلة لكل طرف في كل عقد</span></div>
+      <div className="stat"><span className="stat-icon">✉️</span><b>{unread}</b><span className="stat-label">رسائل غير مقروءة</span><span className="stat-sub">{unread === 0 ? 'لا رسائل بانتظار القراءة' : 'بانتظار القراءة والرد'}</span></div>
+      <div className="stat"><span className="stat-icon">✅</span><b>{openTasks}</b><span className="stat-label">مهام مفتوحة</span><span className="stat-sub">مهام تشغيل لم تُنجز بعد</span></div>
+      <div className="stat"><span className="stat-icon">📋</span><b>{approvedTemplates} / {b.templates.length}</b><span className="stat-label">قوالب معتمدة</span><span className="stat-sub">من قوالب واتساب في الخادم</span></div>
+      <div className="stat danger"><span className="stat-icon">⛔</span><b>{b.killSwitch ? 'مُفعّل' : 'متوقف'}</b><span className="stat-label">مفتاح إيقاف الأتمتة</span><span className="stat-sub">{b.killSwitch ? 'الأتمتة موقوفة الآن' : 'الأتمتة تعمل'}</span></div>
     </div>
     <Card title="حالة الخادم" sub="لا تأكيد مالي بدون مرجع مؤسسة، ولا خطوة آلية تلمس المال أبداً." actions={<button className="btn ghost" onClick={reload}>تحديث</button>}>
       <p>الاتصال بالخادم: {b.healthOk ? <Badge tone="ok">متصل</Badge> : <Badge tone="bad">غير متصل</Badge>} — مفتاح الإيقاف: {b.killSwitch ? <Badge tone="bad">الأتمتة موقوفة</Badge> : <Badge tone="ok">الأتمتة تعمل</Badge>}</p>
@@ -59,10 +62,10 @@ export function Dashboard({ b, reload }: { b: Bundle; reload: () => void }) {
       })()}
       <p className="muted">محادثات مفتوحة: {b.conversations.filter((c) => c.status === 'open' || c.status === 'new').length} — مهام مفتوحة: {openTasks} — رسائل غير مقروءة: {unread}</p>
     </Card>
-    <Card title="أحدث العقود">
+    <Card title="أحدث العقود" sub="آخر 5 عقود من الخادم — افتح صفحة العقود لعرض القائمة الكاملة والتفاصيل.">
       {latest.length === 0 ? <Empty text="لا عقود بعد — أنشئ أول عقد من صفحة العقود." /> :
-        <table><thead><tr><th>الكود</th><th>المنتج</th><th>المبلغ</th><th>الحالة</th><th>أُنشئ</th></tr></thead>
-        <tbody>{latest.map((c) => <tr key={c.id}><td><b>{c.code}</b></td><td>{c.product_description}</td><td>{c.amount} {c.currency}</td><td><Badge tone={stateTone(c.state)}>{STATE_AR[c.state]}</Badge></td><td>{fmt(c.created_at)}</td></tr>)}</tbody></table>}
+        <div className="table-wrap"><table><thead><tr><th>العقد</th><th>الطرفان</th><th>الحالة</th><th>المبلغ</th><th>أُنشئ</th></tr></thead>
+        <tbody>{latest.map((c) => <tr key={c.id}><td><b>{c.code}</b><div className="small">{c.product_description}</div></td><td><div className="small">المشتري: {c.buyer_phone}</div><div className="small">البائع: {c.seller_phone}</div></td><td><Badge tone={stateTone(c.state)}>{STATE_AR[c.state]}</Badge></td><td>{c.amount} {c.currency}</td><td className="small">{fmt(c.created_at)}</td></tr>)}</tbody></table></div>}
     </Card>
   </>;
 }

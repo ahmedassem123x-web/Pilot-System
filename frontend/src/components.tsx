@@ -13,7 +13,7 @@ export function Card({ title, sub, children, actions }: { title: string; sub?: s
 export function LocalNote({ children }: { children: ReactNode }) {
   return <p className="local-note">⚠️ بيانات محلية في هذا المتصفح فقط — لا يوجد endpoint في الخادم الحالي لهذا الإجراء. {children}</p>;
 }
-export function Empty({ text }: { text: string }) { return <p className="empty">{text}</p>; }
+export function Empty({ text }: { text: string }) { return <p className="empty"><span className="empty-icon" aria-hidden="true">📭</span>{text}</p>; }
 export function Badge({ tone, children }: { tone: 'ok' | 'warn' | 'bad' | 'info' | 'neutral'; children: ReactNode }) {
   return <span className={`badge badge-${tone}`}>{children}</span>;
 }

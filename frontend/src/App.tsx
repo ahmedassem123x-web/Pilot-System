@@ -124,20 +124,23 @@ export default function App() {
   function logout() { clearToken(); setMe(null); setData(EMPTY); }
 
   if (!authChecked) return <div className="app"><main><p className="muted">جارٍ التحقق من الجلسة…</p></main></div>;
-  if (!me) return <div className="app" dir="rtl">
+  if (!me) return <div className="app login-wrap" dir="rtl">
     <header className="topbar">
       <div><b className="brand">Pilot System</b><span className="brand-sub"> لوحة تشغيل — النسخة المستقلة</span></div>
     </header>
     <main>
-      <section className="card">
-        <h2>تسجيل الدخول</h2>
-        <p className="muted">لا يستطيع أحد الدخول إلا بعد أن يضيفه المسؤول. المسؤول الأساسي يُنشأ عند أول تشغيل من متغيرات بيئة الخادم فقط.</p>
-        <form className="grid2" onSubmit={doLogin}>
-          <label className="field"><span>البريد الإلكتروني</span><input required type="email" value={loginForm.email} onChange={(e) => setLoginForm({ ...loginForm, email: e.target.value })} placeholder="name@example.com" /></label>
-          <label className="field"><span>كلمة السر</span><input required type="password" value={loginForm.password} onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })} /></label>
-          <button className="btn" type="submit" disabled={loggingIn}>{loggingIn ? 'جارٍ الدخول…' : 'دخول'}</button>
-        </form>
-        {loginErr && <p className="msg">{loginErr}</p>}
+      <section className="card login-card">
+        <div className="login-brand"><b>Pilot System</b><span>لوحة تشغيل فريق العمليات — النسخة المستقلة</span></div>
+        <div className="login-body">
+          <h2>تسجيل الدخول</h2>
+          <p className="muted">لا يستطيع أحد الدخول إلا بعد أن يضيفه المسؤول. المسؤول الأساسي يُنشأ عند أول تشغيل من متغيرات بيئة الخادم فقط.</p>
+          <form onSubmit={doLogin}>
+            <label className="field"><span>البريد الإلكتروني</span><input required type="email" autoComplete="email" value={loginForm.email} onChange={(e) => setLoginForm({ ...loginForm, email: e.target.value })} placeholder="name@example.com" /></label>
+            <label className="field"><span>كلمة السر</span><input required type="password" autoComplete="current-password" value={loginForm.password} onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })} /></label>
+            <button className="btn" type="submit" disabled={loggingIn}>{loggingIn ? 'جارٍ الدخول…' : 'دخول'}</button>
+          </form>
+          {loginErr && <p className="login-error" role="alert">{loginErr}</p>}
+        </div>
       </section>
     </main>
   </div>;
@@ -151,9 +154,16 @@ export default function App() {
   const unread = data.conversations.reduce((s, c) => s + (c.unread_count || 0), 0);
   const activeSubs = nav.subs.filter((s) => (!s.section || hasSection(me, s.section)) && (!s.action || hasAction(me, nav.section, s.action)));
 
+  // Sidebar groups are presentation-only: they reorder nothing, hide nothing,
+  // and never bypass hasSection gating (visibleNav is computed the same way).
+  const SIDE_GROUPS: { title: string; ids: MainTab[] }[] = [
+    { title: 'العمل اليومي', ids: ['dashboard', 'contracts', 'inbox'] },
+    { title: 'القنوات والأتمتة', ids: ['whatsapp', 'automation'] },
+    { title: 'الإدارة والمراجعة', ids: ['users', 'audit', 'settings'] },
+  ];
   return <div className="app">
     <header className="topbar">
-      <button className="burger" onClick={() => setOpen(!open)} aria-label="القائمة">☰</button>
+      <button className="burger" onClick={() => setOpen(!open)} aria-label="القائمة" aria-expanded={open}>☰</button>
       <div><b className="brand">Pilot System</b><span className="brand-sub"> لوحة تشغيل — النسخة المستقلة</span></div>
       <div className="top-status">
         {data.killSwitch && <span className="pill danger">⛔ الأتمتة موقوفة</span>}
@@ -166,7 +176,14 @@ export default function App() {
     {err && <div className="errbar">{err}</div>}
     <div className="layout">
       <aside className={`sidebar ${open ? 'open' : ''}`}>
-        {visibleNav.map((n) => <button key={n.id} className={main === n.id ? 'active' : ''} onClick={() => go(n.id)}>{n.label}{n.id === 'inbox' && unread > 0 ? ` (${unread})` : ''}</button>)}
+        {SIDE_GROUPS.map((g) => {
+          const items = visibleNav.filter((n) => g.ids.includes(n.id));
+          if (items.length === 0) return null;
+          return <div key={g.title} className="side-group">
+            <p className="side-group-title">{g.title}</p>
+            {items.map((n) => <button key={n.id} className={`side-link ${main === n.id ? 'active' : ''}`} onClick={() => go(n.id)}>{n.label}{n.id === 'inbox' && unread > 0 ? ` (${unread})` : ''}</button>)}
+          </div>;
+        })}
         <div className="side-guard">
           <b>ضوابط ثابتة</b>
           <p>لا محفظة داخلية، لا متجر، لا إجراء مالي آلي. تأكيد الدفع لا يتم إلا بمرجع من المؤسسة المالية الخارجية.</p>
