@@ -25,6 +25,7 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import Inbox from './Inbox';
+import type { InboxConversation } from './Inbox';
 
 export interface PanelMessage {
   id: string;
@@ -151,6 +152,20 @@ const HANDOVER_STEPS = [
 export default function App(props: OperationsPanelProps) {
   const [tab, setTab] = useState<Tab>('Lifecycle');
   const [notice, setNotice] = useState<string>('');
+  // Staff sign-in (live panel only). The token lives in sessionStorage
+  // so a refresh keeps the session for the tab, and Sign out clears it.
+  // Without a token the panel shows its sections but contacts no
+  // backend — the same "send nothing" rule as the form guards below.
+  const [token, setToken] = useState<string | null>(() =>
+    typeof sessionStorage === 'undefined'
+      ? null
+      : sessionStorage.getItem('pilot-token'),
+  );
+  const [staffName, setStaffName] = useState<string>('');
+  const [loginError, setLoginError] = useState<string>('');
+  const [conversations, setConversations] = useState<InboxConversation[]>([]);
+  const [inboxLoaded, setInboxLoaded] = useState<boolean>(false);
+  const [inboxStatus, setInboxStatus] = useState<string>('');
   const [depositReference, setDepositReference] = useState('');
   const [institutionConfirmed, setInstitutionConfirmed] = useState(false);
   const [outcomeReference, setOutcomeReference] = useState('');
@@ -159,6 +174,117 @@ export default function App(props: OperationsPanelProps) {
 
   const tx = props.initialTransaction ?? null;
   const base = props.apiBaseUrl ?? '';
+  const effectiveToken = token ?? props.authToken ?? null;
+
+  // Load REAL WhatsApp conversations from the backend inbox endpoint.
+  // The backend stores no message body text (MessageLog rows carry
+  // template, direction, status and timestamps only), so chat bubbles
+  // show the template name and delivery state — never invented text.
+  async function loadInbox(tokenValue: string): Promise<void> {
+    if (!base) {
+      setInboxStatus('Backend not connected — set VITE_API_BASE_URL.');
+      return;
+    }
+    try {
+      const res = await fetch(`${base}/api/whatsapp/inbox`, {
+        headers: { Authorization: `Bearer ${tokenValue}` },
+      });
+      if (!res.ok) {
+        setInboxStatus(`Inbox refused by the backend (HTTP ${res.status}).`);
+        return;
+      }
+      const rows = (await res.json()) as Array<{
+        id: string;
+        transactionId: string | null;
+        channel: string;
+        assignedTo: string | null;
+        tags: string[];
+        triage: 'open' | 'attention' | 'resolved' | null;
+        notes: Array<{ id: string; text: string; author: string }>;
+        messages: Array<{
+          id: string;
+          direction: 'INBOUND' | 'OUTBOUND';
+          template_name: string | null;
+          status: 'QUEUED' | 'SENT' | 'DELIVERED' | 'READ' | 'FAILED';
+          is_dry_run: boolean;
+          sent_at: string | null;
+        }>;
+      }>;
+      setConversations(
+        rows.map((row) => ({
+          id: row.id,
+          transactionId: row.transactionId,
+          transactionState: null,
+          channel: row.channel,
+          assignedTo: row.assignedTo,
+          tags: row.tags,
+          triage: row.triage ?? 'open',
+          notes: row.notes,
+          messages: row.messages.map((message) => ({
+            id: message.id,
+            direction: message.direction,
+            text: null,
+            templateName: message.template_name,
+            mediaKind: null,
+            mediaLabel: null,
+            status: message.status,
+            isDryRun: message.is_dry_run,
+            date: message.sent_at ? message.sent_at.slice(0, 10) : '',
+          })),
+        })),
+      );
+      setInboxLoaded(true);
+      setInboxStatus(
+        rows.length === 0
+          ? 'Inbox is empty: no WhatsApp message has reached the backend yet. New messages appear here once a transaction runs.'
+          : '',
+      );
+    } catch {
+      setInboxStatus('Inbox request failed. Nothing was assumed.');
+    }
+  }
+
+  async function onLogin(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!base) {
+      setLoginError('Backend not connected — set VITE_API_BASE_URL.');
+      return;
+    }
+    const data = new FormData(event.currentTarget);
+    const email = String(data.get('email') ?? '');
+    const password = String(data.get('password') ?? '');
+    try {
+      const res = await fetch(`${base}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      if (!res.ok) {
+        setLoginError('Sign-in refused: check the email and password.');
+        return;
+      }
+      const body = (await res.json()) as {
+        token: string;
+        display_name?: string | null;
+      };
+      setToken(body.token);
+      setStaffName(body.display_name ?? email);
+      setLoginError('');
+      sessionStorage.setItem('pilot-token', body.token);
+      await loadInbox(body.token);
+    } catch {
+      setLoginError('Sign-in request failed.');
+    }
+  }
+
+  function onSignOut(): void {
+    setToken(null);
+    setStaffName('');
+    setConversations([]);
+    setInboxLoaded(false);
+    setInboxStatus('');
+    sessionStorage.removeItem('pilot-token');
+  }
 
   async function post(path: string, body: Record<string, unknown>): Promise<void> {
     if (!base) {
@@ -172,8 +298,8 @@ export default function App(props: OperationsPanelProps) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(props.authToken
-            ? { Authorization: `Bearer ${props.authToken}` }
+          ...(effectiveToken
+            ? { Authorization: `Bearer ${effectiveToken}` }
             : {}),
         },
         body: JSON.stringify(body),
@@ -206,6 +332,39 @@ export default function App(props: OperationsPanelProps) {
         records and reviews only — it never executes a transfer,
         settlement, or refund.
       </p>
+      <section aria-label="Staff sign-in" className="wa-login">
+        {effectiveToken ? (
+          <div>
+            <p>
+              Signed in{staffName ? ` as ${staffName}` : ''} — backend:{' '}
+              {base || 'not connected'}
+            </p>
+            <button type="button" onClick={() => void loadInbox(effectiveToken)}>
+              Reload inbox
+            </button>{' '}
+            <button type="button" onClick={onSignOut}>
+              Sign out
+            </button>
+          </div>
+        ) : (
+          <form onSubmit={(event) => void onLogin(event)}>
+            <label>
+              Staff email <input name="email" type="email" required />
+            </label>{' '}
+            <label>
+              Password <input name="password" type="password" required />
+            </label>{' '}
+            <button type="submit">Sign in</button>
+            {loginError ? <p role="alert">{loginError}</p> : null}
+            <p>
+              First staff account on a fresh deployment comes from the
+              backend&apos;s ADMIN_EMAIL and ADMIN_PASSWORD environment
+              variables — set them in the hosting panel, never here in
+              code.
+            </p>
+          </form>
+        )}
+      </section>
       <nav aria-label="Operations sections">
         {TABS.map((name) => (
           <button
@@ -222,6 +381,25 @@ export default function App(props: OperationsPanelProps) {
         ))}
       </nav>
       {notice ? <p role="status">{notice}</p> : null}
+      {tab === 'Inbox' && !tx ? (
+        <div>
+          {!effectiveToken ? (
+            <p>
+              Sign in above to load real WhatsApp conversations from the
+              backend. Without sign-in the inbox stays empty — it never
+              shows invented messages.
+            </p>
+          ) : inboxStatus ? (
+            <p>{inboxStatus}</p>
+          ) : null}
+          <Inbox
+            layout="desktop"
+            apiBaseUrl={base || undefined}
+            authToken={effectiveToken ?? undefined}
+            conversations={conversations}
+          />
+        </div>
+      ) : null}
       {!tx ? (
         <p>
           No transaction loaded. Connect the panel to the backend
@@ -545,10 +723,13 @@ export default function App(props: OperationsPanelProps) {
               <Inbox
                 layout="desktop"
                 apiBaseUrl={base || undefined}
-                authToken={props.authToken}
-                conversations={[
-                  {
-                    id: tx.id,
+                authToken={effectiveToken ?? undefined}
+                conversations={
+                  inboxLoaded
+                    ? conversations
+                    : [
+                        {
+                          id: tx.id,
                     transactionId: tx.id,
                     transactionState: tx.state,
                     channel: 'whatsapp',
