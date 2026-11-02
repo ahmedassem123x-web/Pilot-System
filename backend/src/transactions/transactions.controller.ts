@@ -169,6 +169,7 @@ export class TransactionsController {
         coordination_records: this.store.coordinationsForTransaction(id),
         delivery_events: this.store.deliveryEventsForTransaction(id),
         disputes: this.store.disputesForTransaction(id),
+        follow_up_cases: this.store.followUpCasesForTransaction(id),
         settlement_summaries:
           this.store.settlementSummariesForTransaction(id),
         message_logs: this.store.messageLogsForTransaction(id),
@@ -383,6 +384,28 @@ export class TransactionsController {
         settlementReference: body.settlementReference,
         confirmationAt: new Date(body.confirmationAt),
         actorId: this.actor(req).id,
+      }),
+    ) as unknown as Record<string, unknown>;
+  }
+
+  @Get(':id/follow-up-cases')
+  followUpCases(@Param('id') id: string): Record<string, unknown>[] {
+    return mapDomainError(() =>
+      this.txs.listFollowUpCases(id),
+    ) as unknown as Record<string, unknown>[];
+  }
+
+  @RequirePermission('transactions.resolve_dispute')
+  @Post(':id/follow-up-cases/:caseId/resolve')
+  resolveFollowUpCase(
+    @Req() req: { actor?: RequestActor },
+    @Param('caseId') caseId: string,
+    @Body() body: { resolution: string },
+  ): Record<string, unknown> {
+    return mapDomainError(() =>
+      this.txs.resolveFollowUpCase(caseId, {
+        resolution: body.resolution,
+        resolvedBy: this.actor(req).id,
       }),
     ) as unknown as Record<string, unknown>;
   }
