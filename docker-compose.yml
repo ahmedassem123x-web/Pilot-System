@@ -1,28 +1,86 @@
+# Pilot System v3.1 — Sprint 0 skeleton compose file.
+# Every secret is a ${VAR} placeholder reference ONLY. No value is written
+# here. Supply real values through the environment (never in this file,
+# never committed) — see .env.example.
+# Stack versions are pinned per v3.1: PostgreSQL 16, Redis 7, Node 20 images.
+
 services:
-  app:
-    build: .
-    environment:
-      DATABASE_URL: postgres://pilot:change-me-in-env@postgres:5432/pilot_system
-      REDIS_URL: redis://redis:6379
-      PORT: "3000"
-    ports:
-      - "3000:3000"
-    depends_on:
-      - postgres
-      - redis
   postgres:
     image: postgres:16
+    container_name: pilot-postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: pilot_system
-      POSTGRES_USER: pilot
-      POSTGRES_PASSWORD: change-me-in-env
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      # Placeholder reference only — must be supplied via environment.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
   redis:
     image: redis:7
+    container_name: pilot-redis
+    restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pilot-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV}
+      PORT: ${PORT}
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      JWT_SECRET: ${JWT_SECRET}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET}
+      WHATSAPP_WEBHOOK_VERIFY_TOKEN: ${WHATSAPP_WEBHOOK_VERIFY_TOKEN}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN}
+      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID}
+      WHATSAPP_API_VERSION: ${WHATSAPP_API_VERSION}
+      FILE_LINK_SECRET: ${FILE_LINK_SECRET}
+      APP_BASE_URL: ${APP_BASE_URL}
+    ports:
+      - "${PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: pilot-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    depends_on:
+      - backend
+
 volumes:
   pgdata:
+    name: pilot-system-pgdata
+  redisdata:
+    name: pilot-system-redisdata
