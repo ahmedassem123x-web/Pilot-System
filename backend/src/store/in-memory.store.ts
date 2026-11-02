@@ -23,6 +23,7 @@ import type {
   CreateCoordinationInput,
   CreateDeliveryEventInput,
   CreateDisputeInput,
+  CreateFollowUpCaseInput,
   CreateMessageLogInput,
   CreatePaymentEvidenceInput,
   CreateSettlementSummaryInput,
@@ -31,6 +32,7 @@ import type {
   DeliveryEvent,
   Dispute,
   FinancialCoordinationRecord,
+  FollowUpCase,
   MessageLog,
   PaymentEvidence,
   Permission,
@@ -65,6 +67,7 @@ export class InMemoryStore implements Store {
   private coordinations: FinancialCoordinationRecord[] = [];
   private deliveryEvents: DeliveryEvent[] = [];
   private disputes: Dispute[] = [];
+  private followUpCases: FollowUpCase[] = [];
   private summaries: SettlementSummary[] = [];
   private messageLogs: MessageLog[] = [];
 
@@ -528,6 +531,48 @@ export class InMemoryStore implements Store {
     return dispute;
   }
 
+  // -- Follow-up cases (OBS-1) ----------------------------------------------
+  createFollowUpCase(input: CreateFollowUpCaseInput): FollowUpCase {
+    if (!this.transactions.has(input.transaction_id)) {
+      throw new NotFoundError('Transaction', input.transaction_id);
+    }
+    const now = new Date();
+    const followUpCase: FollowUpCase = {
+      id: newId(),
+      transaction_id: input.transaction_id,
+      type: input.type,
+      status: 'OPEN',
+      details: input.details,
+      created_by: input.created_by,
+      created_at: now,
+      resolved_by: null,
+      resolved_at: null,
+      resolution: null,
+    };
+    this.followUpCases.push(followUpCase);
+    return followUpCase;
+  }
+
+  followUpCasesForTransaction(transactionId: string): FollowUpCase[] {
+    return this.followUpCases.filter(
+      (c) => c.transaction_id === transactionId,
+    );
+  }
+
+  findFollowUpCaseById(id: string): FollowUpCase | undefined {
+    return this.followUpCases.find((c) => c.id === id);
+  }
+
+  updateFollowUpCase(
+    id: string,
+    patch: Partial<FollowUpCase>,
+  ): FollowUpCase {
+    const followUpCase = this.followUpCases.find((c) => c.id === id);
+    if (!followUpCase) throw new NotFoundError('FollowUpCase', id);
+    Object.assign(followUpCase, patch);
+    return followUpCase;
+  }
+
   createSettlementSummary(
     input: CreateSettlementSummaryInput,
   ): SettlementSummary {
@@ -625,6 +670,7 @@ export class InMemoryStore implements Store {
       coordinations: clone(this.coordinations),
       deliveryEvents: clone(this.deliveryEvents),
       disputes: clone(this.disputes),
+      followUpCases: clone(this.followUpCases),
       settlementSummaries: clone(this.summaries),
       messageLogs: clone(this.messageLogs),
     };
@@ -662,6 +708,7 @@ export class InMemoryStore implements Store {
     this.coordinations.push(...revive(snapshot.coordinations));
     this.deliveryEvents.push(...revive(snapshot.deliveryEvents));
     this.disputes.push(...revive(snapshot.disputes));
+    this.followUpCases.push(...revive(snapshot.followUpCases ?? []));
     this.summaries.push(...revive(snapshot.settlementSummaries));
     this.messageLogs.push(...revive(snapshot.messageLogs));
   }
