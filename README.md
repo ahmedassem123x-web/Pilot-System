@@ -1,180 +1,204 @@
-# Pilot System — النسخة المستقلة القابلة للتسليم
+# Pilot System v3.1 — Rebuild (Sprints 0–5)
 
-نظام تجربة تحقق (MVP Validation Pilot) لتنفيذ صفقات متفق عليها خارج النظام،
-بواجهة عميل واتساب فقط، وتجربة مغلقة بدعوات وموافقة يدوية.
+Governing stack (v3.1, fixed): Node.js 20 LTS + TypeScript 5 + NestJS 10
+backend, PostgreSQL 16 + Prisma 5 database, Redis 7 + BullMQ 5 queues,
+React 18 + TypeScript + Vite operations panel, direct Meta WhatsApp
+Business Platform Cloud API, Docker + Docker Compose deployment.
+Money stays with an external financial institution under manual,
+documented coordination. The system NEVER moves money, never accepts
+by silence/time/job, and has no Control Tower in any form.
 
-## القيود الثابتة (من وثيقة النطاق V1.2)
-- لا محافظ داخلية ولا أرصدة داخل النظام.
-- لا متجر ولا كتالوج منتجات، ولا مطابقة بين مشترين وبائعين.
-- لا ربط آلي بالبنك، ولا تحويل من داخل النظام.
-- المال عند مؤسسة مالية خارجية مرخصة، والتنسيق المالي يدوي فقط.
-- لا تأكيد مالي بدون مرجع من المؤسسة المالية.
-- لا خطوة آلية تلمس المال أبداً: الإفراج والاسترداد وحسم النزاع قرارات بشرية فقط.
-- واجهة العميل: واتساب فقط. لوحة داخلية لفريق التشغيل فقط.
+## Sprint 4 + Sprint 5 status (2026-11-02 — read this first; the rest of this file is Sprint 0-era)
 
-## التقنية (الواقعية، بدون ادعاء)
-- الواجهة: React (هدفها Vite + TypeScript؛ إذا تعذر تثبيت Vite في بيئة البناء، تُسلَّم واجهة React أحادية الصفحة بجودة إنتاج يخدمها الخادم نفسه، ويُذكر ذلك صراحة في تقرير التسليم).
-- الخادم: Node.js LTS، كود معياري بأسلوب Express/NestJS بدون تبعيات خارجية في النسخة الأساسية، حتى يعمل في أي مكان دون تثبيت، ويمكن ترقيته إلى Express/TypeScript دون تغيير شكل الـ API.
-- قاعدة البيانات للإنتاج: PostgreSQL 16 (انظر `db/schema.sql`)؛ التخزين المحلي للاختبار في `backend/src/data.json` وهو مستثنًى من Git.
-- الطوابير للإنتاج: Redis + BullMQ (خدمة Redis في docker-compose).
-- التخزين: متوافق مع S3 لملفات العقود والمرفقات (بيانات الملفات فقط في هذه النسخة).
-- التشغيل المحلي: Docker Compose.
+Sprint 4 (PB-13, PB-26, PB-27) and Sprint 5 (PB-28, PB-29) are
+delivered in this tree — see `docs/sprint-4-report.md`,
+`docs/deployment-checklist.md`, and `docs/compliance-report-v3.1.md`
+for the full reports. Headline results:
 
-## بنية المشروع
-- `backend/` — الخادم، آلة الحالات، Webhook واتساب، الأتمتة، سجل التدقيق.
-- `frontend/` — لوحة التشغيل العربية.
-- `db/schema.sql` — مخطط قاعدة البيانات.
-- `docs/state-machine.md` — آلة الحالات الاثنتا عشرة وحراس الانتقالات.
-- `.env.example` — أسماء المتغيرات فقط، بدون أي قيم حقيقية.
+- Sprint 3's REFUND_PENDING Guard bug is FIXED (a rejected settlement
+  attempt while DISPUTED no longer poisons a later legitimate refund),
+  with a regression test proving the full sequence on one transaction.
+- Full WhatsApp inbox triptych (list | chat | details; phone =
+  list → chat → drawer) with backend read endpoints + triage metadata
+  (assignment, tags, internal notes that are never sent).
+- All 11 critical tests pass TWICE, plus a negative test for every
+  §1.1 prohibition. Full suites TWICE: backend 185/185 (24 suites),
+  frontend 15/15. Both lints clean, both builds clean. Live boot
+  check: /health 200, inbox 401 without token, webhook 403/200.
+- UAT script + operator runbook delivered. UAT minutes are UNSIGNED
+  until Ahmed signs — no signature is claimed, and no UAT session
+  has been run.
+- Delivery package (CORE PROMPT §14.2) present in this tree: source,
+  schema, migrations, config without secrets, docs, runbooks,
+  access-data handover note (names only), OSS licence list
+  (`docs/oss-licences.md`, generated from the installed trees).
 
-## الأمان والمصادقة والصلاحيات (ترقية 2026-10-28)
+### Honest unverified list (do NOT claim these)
 
-### الدخول
-- شاشة دخول عربية (بريد + كلمة سر) تظهر عند غياب الرمز؛ الرمز يُحفظ في
-  `localStorage` ويُرسل كـ `Authorization: Bearer` مع كل طلب، وأي 401 يعيد
-  عرض شاشة الدخول. الخروج يمسح الرمز محلياً.
-- **المسؤول الأساسي (Primary Admin)**: عند أول تشغيل فقط، إذا كان
-  `ADMIN_EMAIL` و`ADMIN_INITIAL_PASSWORD` مضبوطين معاً في بيئة الخادم
-  وكان سجل المستخدمين فارغاً، يُنشأ المسؤول الأساسي (دور `owner`، قسم
-  `Administration`، كل الأقسام وكل الإجراءات، `is_primary_admin=true`).
-  لا توجد أي بيانات دخول مكتوبة في الكود أو الملفات أو المستودع أبداً.
-  إذا لم تُضبط المتغيرات قبل أول تشغيل ولم يوجد أي مستخدم، لن يستطيع أحد
-  الدخول — أعد التشغيل والمتغيرات مضبوطة قبل إنشاء أي مستخدم.
-- لا يستطيع أحد الدخول إلا بعد أن يضيفه المسؤول من تبويب المستخدمين.
-- كلمات السر تُحفظ فقط كتجزئة scrypt مع ملح لكل مستخدم
-  (`scrypt:<salt>:<hash>`)، ولا تُعاد أي تجزئة إلى الواجهة أبداً.
-- الرموز موقّعة بـ HMAC مع `JWT_SECRET` وتنتهي بعد 8 ساعات؛ عند غياب
-  `JWT_SECRET` يستخدم الخادم سراً عشوائياً لكل عملية تشغيل مع تحذير في
-  السجل — لا يوجد سر افتراضي مكتوب.
-- رسالة خطأ دخول واحدة عامة لكل فشل (مستخدم مجهول، كلمة سر خاطئة، حساب
-  معطّل)؛ حد المحاولات الفاشلة 10 لكل عنوان IP كل 15 دقيقة.
-- حد حجم جسم الطلب 1 MB (أكبر يُرفض بـ 413)، وترويسات أمان على كل رد
-  (CSP، X-Content-Type-Options، X-Frame-Options، Referrer-Policy،
-  وCache-Control: no-store على /api).
-- سجل التدقيق يسجّل نجاح/فشل الدخول، إنشاء المستخدم، تغيير/إعادة تعيين
-  كلمة السر، تغيير الصلاحيات، والتعطيل/التفعيل.
+Live Postgres apply; Prisma Store implementation; live Redis/BullMQ;
+live Meta sends; live Postgres restore; Docker Compose up; GitHub
+Actions run; Node 20 behaviour (local Node is 24.22.1); UAT execution
++ signature; staff training delivery; GitHub push; Render deploy.
+All backend tests run on the labelled in-memory Store double, not
+Prisma/Postgres. `npx prisma@5 validate` and `generate` both exit 1
+in this environment (no validation output) — re-run where registry
+access works before any Postgres-backed deploy. No push and no
+deploy were made by this work.
 
-### نموذج الصلاحيات (يفرضه الخادم على كل endpoint، لا إخفاء واجهة فقط)
-- **الأقسام**: dashboard، contracts، inbox، tasks، whatsapp، automation،
-  users، audit، settings. **الإجراءات لكل قسم**: view / create / edit /
-  approve، إضافة manage لقسم المستخدمين.
-- **الأدوار الافتراضية**: المالك كل شيء؛ مشرف التشغيل لوحة القيادة
-  والعقود والإنبكس والمهام والأتمتة والتدقيق (عرض/إنشاء/تعديل واعتماد
-  العقود والمهام)؛ موظف التشغيل لوحة القيادة والعقود والإنبكس والمهام
-  (دون اعتماد)؛ المنسّق المالي عرض فقط للوحة والعقود والإنبكس والمهام
-  والتدقيق — والتأكيد المالي نفسه يبقى إجراءً بشرياً بمرجع مؤسسة ولا
-  يُؤتمت أبداً؛ المشاهد عرض فقط للوحة والعقود والإنبكس والتدقيق.
-- **الأقسام الأربعة**: Operations (العمليات)، Finance Coordination
-  (التنسيق المالي)، Customer Support (دعم العملاء)، Administration
-  (الإدارة) — عبر `GET /api/departments`.
-- **تجاوزات فردية**: المسؤول يستطيع لكل مستخدم تعيين أقسام ظاهرة وإجراءات
-  لكل قسم تستبدل/تقيّد افتراضات دوره (تبويب الصلاحيات)، وتغيير الدور دون
-  تجاوزات يعيد افتراضات الدور الجديد.
-- **أمثلة على الفرض الخلفي**: إنشاء عقد يتطلب `contracts:create`، تأكيد
-  الدفع يتطلب `contracts:approve`، إدارة المستخدمين تتطلب `users:manage`،
-  اعتماد القوالب يتطلب `whatsapp:edit`، مفتاح الإيقاف يتطلب
-  `automation:edit`. المخالفة تُرفض بـ 403 حتى لو فُتح القسم مباشرة.
-- **الحماية**: المسؤول الأساسي لا يمكن تعطيله أو حذفه، والمالك النشط
-  الوحيد محمي أيضاً. المسؤول يضيف مستخدماً (بريد + كلمة سر 8 أحرف على
-  الأقل + دور + قسم + تجاوزات اختيارية)، ويعدّل المستخدم، ويعطّله/يفعّله،
-  ويعيد تعيين كلمة سره (`POST /api/users/:id/reset-password`)؛ والمستخدم
-  نفسه يغيّر كلمة سره (`POST /api/auth/change-password`).
-- تفاصيل إضافية في `backend/README.md`، وبنية لوحة مزوّدي واتساب التي
-  استُلهم منها التنظيم في `docs/provider-dashboard-structure.md`.
+## Sprint 3 status (2026-11-02 — the rest of this file is Sprint 0-era)
 
-### بنية التنقل الجديدة (عربية RTL، تبويبات رئيسية + تبويبات فرعية)
-- لوحة القيادة (Dashboard) — مع ودجات المحادثات المفتوحة وعبء الفريق وغير المقروء.
-- العقود > قائمة العقود، عقد جديد، النسخ، مهام التشغيل.
-- الإنبكس والدردشة > المحادثات، عرض الدردشة، المعيّنة لي، الملاحظات الداخلية.
-- واتساب > الربط والتوصيل، القوالب، الإعدادات (أسماء متغيرات فقط)، حالة Webhook (حالة فقط، بلا قيم سرية).
-- الأتمتة > القواعد، مصمّم التدفقات، مفتاح الإيقاف.
-- المستخدمون > قائمة المستخدمين، إضافة مستخدم، كلمات السر، الصلاحيات، الأقسام.
-- التدقيق والتقارير.
-- إعدادات النظام > إعدادات النظام، قائمة الربط (10 خطوات).
-- الشريط الجانبي يعرض فقط الأقسام المسموحة للمستخدم الحالي، وفتح قسم
-  محظور مباشرة (مثلاً عبر hash) يعرض «لا صلاحية لديك لعرض هذا القسم».
-- كل المزايا السابقة تعمل كما هي (العقود وآلة الحالات الاثنتا عشرة،
-  القوالب، التدفقات، مفتاح الإيقاف، قائمة الربط) — إعادة تنظيم فقط، دون حذف.
+Sprint 3 is implemented on top of Sprint 2 (see `docs/sprint-3-report.md`
+for the full report, and `docs/checkpoint.md` for the running log):
+HTTP controllers for transactions, contracts, evidence, coordination,
+disputes, settlement, delivery/handover events, audit (read-only),
+users, templates, and messages — all behind JWT auth + backend
+permission Guards; WhatsApp webhook with HMAC verification,
+idempotency, and status monotonicity (dry-run transport only — no
+real Meta send); the ONE staff-only React operations panel; the
+configurable payment-instruction voucher; four separate financial
+references; manual verification path; dispute freezing; separation of
+duties wired through HTTP; an in-memory/test queue transport
+(reminders, escalations, and async webhook processing ONLY — live
+Redis behaviour is UNVERIFIED here); file metadata + short-lived
+signed links; and a backup/restore runbook with a unit-tested
+snapshot round-trip. All tests still run against the in-memory test
+double: live PostgreSQL, live Redis, and live Meta behaviour remain
+UNVERIFIED in this environment (no Docker, no Postgres, no Redis, no
+Meta account here). No GitHub push, no deploy.
 
-## التشغيل
-1. انسخ `.env.example` إلى `.env` واملأ القيم في بيئة الاستضافة فقط، وليس في المحادثة ولا في Git.
-2. شغّل قاعدة البيانات وRedis من `docker-compose.yml`.
-3. طبّق `db/schema.sql` ثم شغّل الخادم والواجهة.
-4. أدخل بيانات ربط واتساب في متغيرات بيئة الاستضافة فقط (Render Environment Variables ثم Redeploy) — نموذج الربط داخل النظام لا يحتوي حقل رمز أبداً، ولا يُحفظ أي رمز في ملف أو قاعدة بيانات. التفاصيل الكاملة في `docs/meta-linking.md` والتدقيق في `docs/meta-audit.md`.
+## What runs (Sprints 0–5 — supersedes the Sprint 0 description below)
 
-## النشر (Railway — الخيار الأساسي)
-1. أنشئ مستودع GitHub فارغاً باسم العميل، وادفع هذا المشروع إليه (لا أسرار في Git أبداً).
-2. في Railway: أنشئ مشروعاً جديداً من المستودع، وأضف خدمات PostgreSQL وRedis.
-3. اضبط متغيرات البيئة في لوحة Railway فقط، من أسماء `.env.example`، ثم انشر.
-4. اربط الدومين في Railway، وفعّل HTTPS (تلقائي، عبر Let's Encrypt في Railway/Render).
-5. طبّق `db/schema.sql` على قاعدة بيانات الإنتاج، ثم اختبر دورة عقد كاملة.
-6. النسخ الاحتياطي: نسخة يومية لقاعدة البيانات + الاحتفاظ بملفات العقود في التخزين، واختبار استعادة واحدة قبل التسليم.
-7. المراقبة: تنبيه عند توقف الخادم، ومراجعة سجل التدقيق يومياً في مرحلة التجريب.
+- Backend: NestJS 10 app — `GET /health` → `{"ok": true}` plus the
+  full transaction/contract/evidence/coordination/dispute/settlement/
+  audit/users/templates/messages/inbox API, all behind JWT auth +
+  backend permission Guards, with the 15-state machine and its
+  Guards enforced in `transactions.service.ts`.
+- Frontend: React 18 + Vite staff-only operations panel (Lifecycle,
+  Evidence, Verification, Institution, Settlement, Disputes,
+  Handover, Inbox triptych, Messages, Audit, Users).
+- `docker-compose.yml`: PostgreSQL 16, Redis 7, backend, and frontend
+  services with named volumes (`pilot-system-pgdata`,
+  `pilot-system-redisdata`) and healthchecks. All secrets are `${VAR}`
+  placeholder references only — see `.env.example`. The compose file
+  is file-reviewed and YAML-parsed; `docker compose up` has NOT been
+  run here (no Docker binary).
 
-## التسليم للعميل
-- الحسابات باسم العميل: GitHub، Railway، الدومين، Meta Business، WhatsApp Business، والمؤسسة المالية.
-- لا تُسلَّم أي كلمة مرور أو رمز في المحادثة أو في المستودع؛ تُدخل في لوحات الخدمات فقط.
-- دليل التشغيل للعميل: إنشاء عقد، إدارة الإنبكس، تأكيد مالي بمرجع، فتح نزاع، إيقاف الأتمتة، إضافة مستخدم.
-- ما لا يعمل قبل الربط: الإرسال والاستقبال الفعلي عبر واتساب عبر Meta — الكود مبني الآن بالكامل (إرسال نص/قالب/وسائط، استقبال إلى الإنبكس، تحديثات الحالة والقوالب، نافذة 24 ساعة، وضع تجريبي Dry-Run عند غياب الإعداد)، لكنه لا يتصل بـ Meta إلا بعد إعداد حساب العميل في Meta ورقم مخصص وقوالب معتمدة ومتغيرات البيئة. انظر `docs/meta-linking.md`.
+## What does NOT exist yet (plainly)
 
-## ربط Meta WhatsApp (مبني، بانتظار إعداد العميل)
-- واجهة برمجة Meta: Cloud API المباشر، بدون وسيط (BSP)، إصدار Graph API من `WHATSAPP_API_VERSION` (الافتراضي v26.0).
-- متغيرات البيئة (أسماء فقط، في لوحة Render فقط): `WHATSAPP_VERIFY_TOKEN`، `WHATSAPP_APP_SECRET`، `WHATSAPP_ACCESS_TOKEN`، `WHATSAPP_PHONE_NUMBER_ID`، `WHATSAPP_BUSINESS_ACCOUNT_ID`، `WHATSAPP_API_VERSION`، `APP_BASE_URL`.
-- صيغة Webhook: `<APP_BASE_URL>/api/whatsapp/webhook` — مثال على النشر الحي: `https://pilot-system-z5vc.onrender.com/api/whatsapp/webhook`. التحقق GET بمقارنة رمز التحقق، والوارد POST بتوقيع HMAC-SHA256 على الجسم الخام (raw body)، مع رفض التوقيع الغائب أو السيئ.
-- معالج الربط داخل النظام (واتساب > الربط والتوصيل): 7 خطوات بحالة خضراء/كهرمانية/حمراء من الخادم، زر اختبار الرمز (دون عرض الرمز أو حفظه)، نموذج رسالة اختبار (وضع تجريبي واضح عند غياب Meta، ورفض النص الحر خارج نافذة 24 ساعة مع اقتراح قالب)، وقوالب بحالتين منفصلتين: محلية وMeta (معتمدة/قيد المراجعة/مرفوضة/غير مقدَّمة).
-- الفصل: إزالة متغيرات البيئة أو إعادة النشر بدونها يفصل Meta بالتصميم (لا رمز محفوظ يُعاد استخدامه). مفتاح الإيقاف يوقف الإرسال والأتمتة، ولا يلمس المال أبداً.
-- ما لا يستطيع فعله إلا مالك حساب العميل نفسه: توثيق Meta Business، امتلاك الرقم واستلام رمز OTP، اسم العرض، إنشاء/إلغاء رمز النظام، طريقة الدفع لدى Meta، وقبول التشغيل النهائي. القوالب فئة Utility فقط — لا حملات تسويقية ولا كتالوجات ولا دفع داخل الدردشة.
+- No Prisma Store implementation (backend runs on the in-memory test
+  double); no live Postgres apply; no live Redis/BullMQ transport;
+  no real Meta transport (dry-run only); no real object storage.
+- No UAT session run or signed minutes; no training delivered.
+- No push to GitHub and no deployment to any host. None was done by
+  this work, and none should be done before the Sprint Acceptance
+  Gate (CORE PROMPT §5.5) plus Ahmed's separate explicit written
+  authorisation.
 
-## حالة هذا الأساس
-تم بناء الخادم والواجهة على هذا الأساس، واختبارهما مرتين بنجاح بعد ترقية
-الأمان والمصادقة وإعادة التنظيم (2026-10-28):
-55 فحصاً في كل جولة، بدون أي فشل — الـ 42 الأصلية (منها: رفض الانتقال غير
-الصالح، رفض التأكيد المالي بدون مرجع مؤسسة، قبول التأكيد بمرجع، رفض خطوة
-مالية في الورك فلو، وسجل تدقيق إلحاقي، ومفتاح إيقاف يعمل، و10 قوالب) إضافة
-إلى فحوصات المصادقة والصلاحيات (رفض غير المصادق بـ 401، خطأ دخول عام،
-دخول المسؤول الأساسي المزروع من البيئة، إنشاء مستخدم ودخوله، رفض دخول
-المعطّل، رفض 403 لمستخدم بلا صلاحية قسم، تجزئة scrypt بدل النص الصريح،
-وحماية المسؤول الأساسي). ملف `backend/src/data.json` محذوف بعد التحقق
-وهو مستثنًى من Git.
+## Local development (without Docker)
 
-## تكامل Meta WhatsApp (2026-10-29) — مبني ومختبر، بانتظار إعداد العميل
-بُني تكامل Meta الكامل بعد تدقيق أثبت أن الربط السابق كان هيكلاً فقط
-(انظر `docs/meta-audit.md` وخطة الربط `docs/meta-linking.md`)، واختُبر
-مرتين بنجاح: **92 فحصاً في كل جولة، بدون أي فشل** (الـ 55 السابقة كلها
-ما زالت تمر، + 37 جديدة بخادم Meta وهمي محلي: تحقق Webhook، رفض HMAC
-السيئ والغائب، رفض JSON/المغلف غير الصالح، استقبال إلى محادثة عقد مطابقة
-وإلى محادثة عامة دون إنشاء عقد تلقائياً، منع تكرار `wamid`، استقبال
-تحديثات الحالة والقوالب، إرسال نص وقالب عبر الوهمي، رفض النص الحر خارج
-نافذة 24 ساعة، وضع تجريبي عند غياب الإعداد، رفض الإرسال مع مفتاح الإيقاف،
-ورفض غير المصادق، وعدم ظهور أي رمز في أي رد). التحقق المستقل: TypeScript
-نظيف، بناء Vite ناجح (352.01 kB)، الخادم يخدم الواجهة بـ 200، وغير
-المصادق على `/api/contracts` بـ 401، و`/health` بـ ok مع الحالات الاثنتي
-عشرة. الخطوة التالية هي الرفع إلى GitHub (سيعيد Render النشر تلقائياً)،
-ثم إعداد Meta باسم العميل فقط — لا توجد بيانات Meta حقيقية في هذا
-المستودع، ولا يعمل الإرسال الفعلي قبل ذلك الإعداد.
+Prerequisites: Node.js 20 LTS (see "Honest limits" below about the local
+Node version used to verify this scaffold) and npm 10+.
 
-## تحديث الواجهة (2026-10-29) — مستوى تلميع صفحة المعاينة
-أُعيد تلميع الواجهة الأمامية فقط (دون أي تغيير في الـ API أو الصلاحيات أو
-آلة الحالات أو سجل التدقيق) لتصل إلى مستوى التلميع الاحترافي لصفحة
-المعاينة العامة، مع بقاء كل الأرقام من بيانات الخادم الحقيقية فقط
-(وتبدأ فارغة — لا أرقام تجريبية مكتوبة أبداً):
-- شاشة الدخول: بطاقة مركزية بعلامة داكنة (navy) وعنوان وعنوان فرعي واضحين
-  وحقول أكبر وحالة خطأ ظاهرة.
-- لوحة القيادة: بطاقات إحصاء بارزة بأيقونة ورقم كبير وتسمية وتسمية فرعية،
-  وجدول أحدث العقود (العقد، الطرفان، شارة الحالة، المبلغ، تاريخ الإنشاء)
-  مع حالة فراغ واضحة.
-- كل الأقسام: رؤوس بطاقات موحّدة، جداول برأس ثابت نسبياً وتظليل عند
-  التحويم وشارات حالة، شبكات نماذج وأزرار أساسية/شبح/خطر وحبوب (pills)
-  وتنسيق موحّد للملاحظات الداخلية في الإنبكس.
-- الشريط الجانبي: مجمّع في ثلاث مجموعات (العمل اليومي، القنوات والأتمتة،
-  الإدارة والمراجعة) مع حالة نشطة واضحة، ودرج قابل للطي مع خلفية معتمة
-  على الهاتف والجهاز اللوحي — منطق التنقل والتبويبات الفرعية وتصفية
-  الصلاحيات كما هي دون تغيير.
-- الخطوط والمسافات: حزمة خطوط عربية حديثة، مقياس متسق، فجوات 12–16px،
-  بطاقات بزوايا 14–16px وظلال ناعمة وحلقات تركيز ظاهرة.
-- الاستجابة: 390px (عمود واحد، درج جانبي، إحصاءات بعمودين)، 820px
-  (إحصاءات بثلاثة أعمدة، إنبكس ومعاينة التدفق مكدّسة)، 1440px (شريط جانبي
-  كامل وإحصاءات بستة أعمدة).
-- النشر: Render ينشر تلقائياً عند الدفع إلى فرع main، لذا فإن أي دفع إلى
-  GitHub سيعيد نشر https://pilot-system-z5vc.onrender.com تلقائياً — لم
-  يُدفع أي شيء في هذا التحديث، والدفع قرار منفصل.
+```bash
+# Backend — from the repository root
+cd backend
+npm ci
+npm run dev        # starts on port 3000 (or $PORT)
+# Check it:
+curl http://localhost:3000/health
+# Expected: {"ok":true}
+
+# Frontend — from the repository root, in a second terminal
+cd frontend
+npm ci
+npm run dev        # starts on port 5173
+# Open http://localhost:5173
+```
+
+Other useful commands, in each of `backend/` and `frontend/`:
+
+```bash
+npm run lint       # backend: ESLint; frontend: ESLint
+npm test           # backend: Jest; frontend: Vitest
+npm run build      # backend: tsc to dist/; frontend: tsc + Vite build
+```
+
+## Docker Compose (full stack, from zero)
+
+Prerequisites: Docker + Docker Compose on the machine that runs this.
+Copy an environment file first — never commit real values:
+
+```bash
+cp .env.example .env
+# Edit .env and fill in values locally. It is git-ignored.
+# Development / Staging / Production each get their OWN .env file with
+# their OWN values; see .env.development.example and
+# .env.production.example (names only, no values).
+
+docker compose up --build
+# Backend:  http://localhost:3000/health  -> {"ok":true}
+# Frontend: http://localhost:5173
+docker compose down            # stop, keep volumes (data survives)
+docker compose down -v         # stop AND delete volumes (data is lost)
+```
+
+## Environments
+
+Development, Staging, and Production are SEPARATE. Each environment has
+its own `.env` file (never committed), its own database, and its own
+credentials. Environment files in this repository contain VARIABLE NAMES
+ONLY — never values, never tokens. `.env.example` is the full list;
+`.env.development.example` and `.env.production.example` carry the same
+names with the separation note for their environment.
+
+## CI
+
+`.github/workflows/ci.yml` runs, for both backend and frontend, on every
+push and pull request: `npm ci`, `npm run lint`, `npm test`, and
+`npm run build`, on Node 20. A failing CI blocks merge — that blocking is
+enforced by GitHub branch protection, which the repository owner must
+enable on the protected branch (require status checks to pass before
+merging). The workflow file alone does not turn branch protection on.
+
+## Honest limits — what was verified here, and what was not
+
+- The scaffold author's machine in this session runs Node v24.22.1 and
+  npm 10.9.4, NOT the pinned Node 20. The code, Dockerfiles, Compose file,
+  CI, and `engines` fields all pin Node 20 LTS per v3.1; local verification
+  below was done on Node 24, so Node-20 behaviour is verified by CI/Docker,
+  not by the local runs in this session. `npm ci`/`npm install` on Node 24
+  prints an engines warning but proceeds (engines are not enforced
+  unless `engine-strict` is set).
+- This machine has NO Docker binary installed, so `docker compose up`
+  could NOT be run here. The Compose file, Dockerfiles, volumes, and
+  healthchecks are written but UNVERIFIED by an actual container run.
+  They must be verified on a machine with Docker before Sprint 0 is
+  accepted as "runs from zero" via Docker.
+- This machine has NO local PostgreSQL server, so no live database
+  connection was tested. The backend does not connect to any database in
+  Sprint 0, so this does not block the skeleton — but it means the
+  PostgreSQL 16 service in Compose is also unverified here.
+- GitHub Actions could NOT be run from this machine. CI is defined and
+  must go green on the first real push/PR; it has not been observed green
+  here.
+- No GitHub push, no Render deploy, and no deletion were performed by
+  this task, per its instructions.
+
+## Layout
+
+```
+pilot-system-v31/
+  backend/                 NestJS 10 skeleton (src/main.ts, app.module.ts,
+                           app.controller.ts with GET /health only,
+                           app.service.ts, one controller spec)
+                           NOTE: backend/prisma/ is NOT part of this
+                           scaffold task — it is owned by the Sprint 1
+                           worker and may appear alongside this scaffold.
+  frontend/                React 18 + Vite skeleton (App.tsx only)
+  docker-compose.yml       postgres:16, redis:7, backend, frontend
+  .env.example             variable names only
+  .env.development.example variable names only (Development)
+  .env.production.example  variable names only (Production)
+  .github/workflows/ci.yml lint + unit tests + build, Node 20
+  docs/                    pre-existing (product backlog — not touched)
+```
