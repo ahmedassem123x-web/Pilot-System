@@ -1,0 +1,582 @@
+// Pilot System v3.1 — Prisma data model (Sprint 1, PB-04)
+// Governing source: CORE PROMPT §7 (data model), §8 (15 states), §9 (Sold as Seen),
+// §11 (financial mechanism), §12 (WhatsApp), §14 (argon2id, RBAC, separation of duties).
+// Stack: PostgreSQL 16 + Prisma 5. This file is DESIGN + MIGRATION SOURCE ONLY.
+// It has NOT been applied to any live PostgreSQL database in this environment
+// (no local Postgres here — see migration.sql header and the Sprint 1 report).
+// Migration status: VALIDATED-ONLY (prisma validate / generate attempted; see report).
+//
+// SCOPE RULES BAKED INTO THIS SCHEMA (not UI-only):
+// - The system NEVER moves money. There is no wallet, no balance, no ledger,
+//   no payment gateway, no bank API, no fee/commission/distribution field.
+//   Transaction.amount is DESCRIPTIVE ONLY (documentation / coordination).
+// - No independent project-management tables, roles, permissions, KPIs or
+//   reports exist in this schema. The ONLY panel is the transaction
+//   operations panel (CORE PROMPT §13: staff operations on transactions,
+//   evidence, coordination, disputes, audit). No extra panel is modelled
+//   here.
+// - Buyer/Seller is a PER-TRANSACTION record (TransactionParty.role) only.
+//   User has NO buyer/seller account type. One permanent UUID per person,
+//   one whatsapp_number for communication; the same person as buyer in one
+//   transaction and seller in another creates NO second User row.
+// - BUYER_ARRIVED_AT_HANDOVER and HANDOVER_INSPECTION_COMPLETED are
+//   DeliveryEvent.event_type values (audit events), NEVER TransactionState
+//   values. See docs/transition-matrix.md.
+// - Buyer evidence (PaymentEvidence) is STRICTLY SEPARATE from institution
+//   confirmation (FinancialCoordinationRecord). EvidenceStatus has exactly
+//   ONE value at this stage, so no evidence row can ever read as funded
+//   or confirmed. Funding confirmation lives ONLY in
+//   FinancialCoordinationRecord (institution_confirmed = true AND a
+//   deposit_reference recorded) plus the FUNDED_CONFIRMED Guard in Sprint 2.
+// - Four financial references are SEPARATE fields, never merged:
+//     1. Transaction ID .................. Transaction.id
+//     2. External Payment Reference ...... PaymentEvidence.external_payment_reference
+//        (mirrored for coordination lookup ONLY on
+//         Transaction.external_payment_reference; the evidence row is the
+//         source of truth — a mirror that disagrees with evidence is a
+//         staff-review exception, never a funding fact)
+//     3. Financial Institution Deposit Reference
+//        ............................... FinancialCoordinationRecord.deposit_reference
+//        (UNIQUE across transactions — see below; also recorded on
+//         SettlementSummary.deposit_reference, which must match it)
+//     4. Financial Institution Settlement Reference
+//        ............................... FinancialCoordinationRecord.settlement_reference
+//        and SettlementSummary.settlement_reference (recorded ONLY after
+//        institution confirmation of settlement/refund execution)
+//   Deposit/settlement references are deliberately NOT duplicated onto
+//   Transaction, so there is exactly one source of truth for each.
+// - Financial Institution Deposit Reference UNIQUENESS:
+//   FinancialCoordinationRecord.deposit_reference is a nullable UNIQUE
+//   column. NULLs do not collide (PostgreSQL treats NULLs as distinct),
+//   so unconfirmed coordinations may all have NULL, but one non-NULL
+//   deposit reference can confirm funding for AT MOST ONE transaction.
+//   A duplicate insert MUST fail at the database (unique violation) and
+//   Sprint 2/3 code MUST surface that failure to staff as a manual-review
+//   case — it must never be silently retried, overwritten, or auto-resolved.
+// - AuditEvent + ContractVersion IMMUTABILITY:
+//   Application code alone is NOT the enforcement. The migration SQL adds
+//   database triggers that raise an exception on ANY UPDATE or DELETE of
+//   those tables (see migration.sql). A trigger can still be bypassed by a
+//   database owner/superuser, so at deployment (Sprint 5) the application
+//   must connect as a dedicated non-owner role AND that role must have
+//   UPDATE/DELETE revoked on audit_events and contract_versions. That
+//   revoke step is deployment configuration, not part of this Sprint 1
+//   migration, because the production role name does not exist yet.
+// - Separation of duties (funding confirmer != settlement approver, same
+//   transaction) CANNOT be expressed as a single-table database constraint:
+//   it compares FinancialCoordinationRecord.staff_id with the staff member
+//   who records settlement (SettlementSummary.prepared_by / the settling
+//   staff_id in Sprint 3). It is therefore enforced in the Sprint 2/3
+//   backend Guard + tested (CORE PROMPT critical test 5), and every
+//   attempt is written to AuditEvent. This schema only makes the
+//   comparison POSSIBLE by recording both staff ids — it does not claim
+//   the database alone enforces it. Do not weaken this note.
+// - Secrets: this file contains NO secret value. The datasource reads only
+//   the environment VARIABLE NAME DATABASE_URL. No token, no number, no
+//   password, no key appears anywhere in this file.
+// - No demo/seed data is defined here. Seed data, if any, belongs to a
+//   separate, explicitly-labelled test fixture in Sprint 4 — never
+//   auto-seeded into production.
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+// EXACTLY the 15 unified states, in CORE PROMPT §8 order. No more, no less.
+// Adding a 16th state, or using an audit-event name as a state, is a v3.1
+// violation and must be rejected in review, not added silently.
+enum TransactionState {
+  DRAFT
+  PENDING_REVIEW
+  ACCEPTED
+  AWAITING_FUNDING_CONFIRMATION
+  FUNDED_CONFIRMED
+  IN_FULFILMENT
+  DELIVERED
+  RECEIPT_CONFIRMED
+  SETTLEMENT_PENDING
+  SETTLED
+  DISPUTED
+  REFUND_PENDING
+  REFUNDED
+  COMPLETED
+  CANCELLED
+}
+
+enum UserStatus {
+  APPROVED
+  NOT_APPROVED
+  SUSPENDED
+}
+
+// Role lives ONLY on TransactionParty, per transaction. Never on User.
+enum PartyRole {
+  BUYER
+  SELLER
+}
+
+// DELIBERATELY a single-value enum at this stage. This is the database
+// enforcement of "status is ALWAYS Payment Evidence Submitted — NEVER
+// funded, NEVER confirmed" (CORE PROMPT §7). Adding a second value here
+// would be a scope change requiring a signed written change request.
+enum EvidenceStatus {
+  PAYMENT_EVIDENCE_SUBMITTED
+}
+
+enum DisputeStatus {
+  OPEN
+  RESOLVED
+}
+
+// Outcome recorded by the HUMAN resolver. It is not a state transition by
+// itself: the resolver's outcome decides which allowed transition (see
+// docs/transition-matrix.md) may follow, and the transition Guard checks it.
+enum DisputeResolutionOutcome {
+  REFUND
+  PROCEED
+  CANCELLED
+}
+
+// Audit events for the Sold-as-Seen handover, plus seller-arrival and
+// readiness events. These are DeliveryEvent rows, NOT TransactionState
+// values. OPERATIONAL_EXCEPTION_PRODUCT_ABSENT records step 4 of §9:
+// buyer arrived, product was NOT there — staff are notified, and the
+// product is NOT treated as received or accepted. That event advances
+// NO state on its own.
+enum DeliveryEventType {
+  SELLER_ARRIVED_AT_DELIVERY_POINT
+  HANDOVER_READINESS_NOTIFIED
+  BUYER_ARRIVED_AT_HANDOVER
+  HANDOVER_INSPECTION_COMPLETED
+  OPERATIONAL_EXCEPTION_PRODUCT_ABSENT
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+// Status monotonicity (SENT -> DELIVERED -> READ; FAILED from any state)
+// is enforced by the Sprint 2 Webhook Guard, NOT by this enum alone:
+// an enum cannot express ordering. The Guard must reject any downgrade
+// except to FAILED, and MessageLog rows for dry-run sends must carry
+// is_dry_run = true and must never be presented as actually sent.
+enum MessageStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+// Local approval and Meta approval are SEPARATE fields on MessageLog /
+// template records (see MessageLog.template_local_approval and
+// template_meta_approval). A template approved locally but rejected by
+// Meta is UN-SENDABLE; the rejection reason must be shown to staff.
+enum TemplateApproval {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// ---------------------------------------------------------------------------
+// Identity: one permanent person, one communication number
+// ---------------------------------------------------------------------------
+
+model User {
+  id              String     @id @default(uuid()) @db.Uuid
+  whatsapp_number String     @unique
+  status          UserStatus @default(NOT_APPROVED)
+  created_at      DateTime   @default(now())
+  updated_at      DateTime   @updatedAt
+
+  parties TransactionParty[]
+
+  @@map("users")
+}
+
+model TransactionParty {
+  id             String    @id @default(uuid()) @db.Uuid
+  transaction_id String    @db.Uuid
+  user_id        String    @db.Uuid
+  role           PartyRole
+
+  transaction Transaction @relation(fields: [transaction_id], references: [id], onDelete: Restrict)
+  user        User        @relation(fields: [user_id], references: [id], onDelete: Restrict)
+
+  // At most ONE buyer and at most ONE seller per transaction (database).
+  // Sprint 2 must additionally enforce EXACTLY one of each before a
+  // transaction may leave DRAFT: a transaction with zero or two buyers
+  // must fail its Guard. The database alone cannot express "exactly one".
+  @@unique([transaction_id, role])
+  @@map("transaction_parties")
+}
+
+// ---------------------------------------------------------------------------
+// Transaction (descriptive amount only — never money movement)
+// ---------------------------------------------------------------------------
+
+model Transaction {
+  id            String           @id @default(uuid()) @db.Uuid
+  state         TransactionState @default(DRAFT)
+  // DESCRIPTIVE ONLY. No wallet, balance, fee, commission or distribution
+  // may ever be derived from this field in the pilot.
+  amount        Decimal          @db.Decimal(19, 2)
+  // Recorded, NOT processed as multi-currency accounting. No currency
+  // conversion, no multi-currency ledger exists in this system.
+  currency      String
+  product_description String
+  quantity      Int
+  delivery_point String
+  cancellation_terms String
+  // Coordination lookup mirror ONLY — see the header note on reference 2.
+  // NULL until buyer evidence is submitted. Never a funding fact.
+  external_payment_reference String?
+  created_at    DateTime         @default(now())
+  updated_at    DateTime         @updatedAt
+
+  parties               TransactionParty[]
+  contract_versions     ContractVersion[]
+  payment_evidences     PaymentEvidence[]
+  coordination_records  FinancialCoordinationRecord[]
+  delivery_events       DeliveryEvent[]
+  disputes              Dispute[]
+  settlement_summaries  SettlementSummary[]
+  audit_events          AuditEvent[]
+  message_logs          MessageLog[]
+
+  @@map("transactions")
+}
+
+// ---------------------------------------------------------------------------
+// Contract versions: never overwritten, never deleted
+// ---------------------------------------------------------------------------
+
+model ContractVersion {
+  id              String    @id @default(uuid()) @db.Uuid
+  transaction_id  String    @db.Uuid
+  version_number  Int
+  // SHA-256 fingerprint (64 hex characters) of the stored contract
+  // content (file bytes / canonical text). The accepted version is the
+  // frozen reference; its hash, acceptance timestamp, WhatsApp messages
+  // and audit log must all agree, or staff review is triggered.
+  content_hash    String
+  // Pointer to the stored contract file in S3-compatible storage
+  // (file id / short-lived signed-link target). The hash above is the
+  // integrity proof for whatever this points to; the file itself is not
+  // stored in PostgreSQL.
+  storage_file_id String?
+  accepted_at     DateTime?
+  // UUID of the User who accepted this version, if any. NULL = not yet
+  // accepted. No acceptance timestamp + no accepter = not the frozen
+  // reference, whatever the UI shows.
+  accepted_by     String?   @db.Uuid
+  // UUID of the version that superseded this one, if any. NULL = current.
+  // IMMUTABILITY TENSION, RECORDED HONESTLY: because the migration
+  // trigger forbids UPDATE on this table, this pointer can only be set
+  // at insert time (when the superseding version is already known).
+  // Sprint 2 MUST therefore treat the highest version_number per
+  // transaction as the current version, and must NOT rely on updating
+  // this column after the fact. If Sprint 2 review finds the column
+  // unusable, it is removed by a NEW migration with a written note —
+  // never by allowing UPDATEs. Superseding NEVER deletes or edits the
+  // old row's content or hash: it only creates a NEW row.
+  superseded_by   String?   @db.Uuid
+  created_at      DateTime  @default(now())
+
+  transaction Transaction @relation(fields: [transaction_id], references: [id], onDelete: Restrict)
+
+  @@unique([transaction_id, version_number])
+  @@map("contract_versions")
+}
+
+// ---------------------------------------------------------------------------
+// Buyer evidence — submitted only, never a funding confirmation
+// ---------------------------------------------------------------------------
+
+model PaymentEvidence {
+  id                         String         @id @default(uuid()) @db.Uuid
+  transaction_id             String         @db.Uuid
+  channel                    String
+  sender_name                String
+  beneficiary_name_as_shown  String?
+  amount                     Decimal        @db.Decimal(19, 2)
+  currency                   String
+  // Reference 2: original transfer/remittance reference from the
+  // bank/wallet/network, as supplied by the buyer. It proves nothing
+  // about funding on its own.
+  external_payment_reference String
+  receipt_file_id            String?
+  submitted_at               DateTime       @default(now())
+  submitted_by               String         @db.Uuid
+  // Single-value enum by design (see enum note). This row can never be
+  // updated to "funded" or "confirmed" — there is no such value to update
+  // to, and Sprint 2 must not add one without a signed change request.
+  status                     EvidenceStatus @default(PAYMENT_EVIDENCE_SUBMITTED)
+
+  transaction Transaction @relation(fields: [transaction_id], references: [id], onDelete: Restrict)
+
+  @@map("payment_evidences")
+}
+
+// ---------------------------------------------------------------------------
+// Financial coordination — the ONLY place an institution confirmation
+// may enter the system (manual, staff-recorded, documented)
+// ---------------------------------------------------------------------------
+
+model FinancialCoordinationRecord {
+  id               String    @id @default(uuid()) @db.Uuid
+  transaction_id   String    @db.Uuid
+  staff_id         String    @db.Uuid
+  contact_method   String
+  message_sent     String?
+  institution_response String?
+  // Reference 3. NULLABLE + UNIQUE: NULL until the institution actually
+  // issues a deposit/booking reference. One non-NULL value may confirm
+  // funding for at most one transaction (see header note for the
+  // duplicate-surfacing rule).
+  deposit_reference String?  @unique
+  // Reference 4. NULL until the institution confirms settlement/refund
+  // execution. Deliberately NOT unique in this schema: the specification
+  // requires uniqueness only for the deposit reference. A settlement
+  // reference that appears on two transactions is still a staff-review
+  // exception, surfaced by Sprint 3 reporting — but it must not be
+  // silently blocked or merged by an invented constraint.
+  settlement_reference String?
+  // BOTH conditions of the funding gate (CORE PROMPT §11.4) must be true
+  // for FUNDED_CONFIRMED: institution_confirmed = true AND
+  // deposit_reference IS NOT NULL. Either missing => Guard rejects.
+  institution_confirmed Boolean @default(false)
+  recorded_at      DateTime  @default(now())
+
+  transaction Transaction @relation(fields: [transaction_id], references: [id], onDelete: Restrict)
+  staff       StaffUser   @relation(fields: [staff_id], references: [id], onDelete: Restrict)
+
+  @@map("financial_coordination_records")
+}
+
+// ---------------------------------------------------------------------------
+// Delivery / handover audit events (not states)
+// ---------------------------------------------------------------------------
+
+model DeliveryEvent {
+  id             String            @id @default(uuid()) @db.Uuid
+  transaction_id String            @db.Uuid
+  event_type     DeliveryEventType
+  recorded_at    DateTime          @default(now())
+  recorded_by    String            @db.Uuid
+  note           String?
+
+  transaction Transaction @relation(fields: [transaction_id], references: [id], onDelete: Restrict)
+
+  @@map("delivery_events")
+}
+
+// ---------------------------------------------------------------------------
+// Dispute — freezes closure and settlement while OPEN
+// ---------------------------------------------------------------------------
+
+model Dispute {
+  id                String                    @id @default(uuid()) @db.Uuid
+  transaction_id    String                    @db.Uuid
+  reason            String
+  evidence_file_ids String[]
+  status            DisputeStatus             @default(OPEN)
+  resolution        String?
+  resolution_outcome DisputeResolutionOutcome?
+  resolved_by       String?                   @db.Uuid
+  resolved_at       DateTime?
+  created_at        DateTime                  @default(now())
+  updated_at        DateTime                  @updatedAt
+
+  transaction Transaction @relation(fields: [transaction_id], references: [id], onDelete: Restrict)
+
+  @@map("disputes")
+}
+
+// ---------------------------------------------------------------------------
+// Settlement summary — prepared MANUALLY by staff, never auto-generated
+// from a WhatsApp message alone, never changing the beneficiary from a
+// WhatsApp message alone. Any discrepancy = follow-up case until the
+// institution completes its approved verification.
+// ---------------------------------------------------------------------------
+
+model SettlementSummary {
+  id                              String    @id @default(uuid()) @db.Uuid
+  transaction_id                  String    @db.Uuid
+  // Must match the FinancialCoordinationRecord.deposit_reference for
+  // this transaction. A mismatch is a staff-review exception.
+  deposit_reference               String
+  // Recorded ONLY after institution confirmation of execution.
+  settlement_reference            String
+  amount                          Decimal   @db.Decimal(19, 2)
+  currency                        String
+  beneficiary_name                String
+  delivery_proof_or_dispute_outcome String
+  // Staff member who PREPARED this summary. Separation of duties:
+  // the Sprint 2/3 Guard must reject settlement recording when this
+  // preparer / the settling staff member is the SAME person who recorded
+  // the funding confirmation (FinancialCoordinationRecord.staff_id) for
+  // the same transaction. See header note — backend + test, not DB-only.
+  prepared_by                     String    @db.Uuid
+  prepared_at                     DateTime  @default(now())
+  // NULL until the institution confirms execution. SETTLED requires a
+  // non-NULL value here (plus settlement_reference) in its Guard.
+  institution_confirmation_at     DateTime?
+
+  transaction Transaction @relation(fields: [transaction_id], references: [id], onDelete: Restrict)
+  preparer    StaffUser   @relation(fields: [prepared_by], references: [id], onDelete: Restrict)
+
+  @@map("settlement_summaries")
+}
+
+// ---------------------------------------------------------------------------
+// Audit log — Append-Only, database-enforced (see migration triggers)
+// ---------------------------------------------------------------------------
+
+model AuditEvent {
+  id              String            @id @default(uuid()) @db.Uuid
+  correlation_id  String            @db.Uuid
+  transaction_id  String?           @db.Uuid
+  actor_id        String?           @db.Uuid
+  actor_role      String
+  action          String
+  previous_state  TransactionState?
+  new_state       TransactionState?
+  timestamp       DateTime          @default(now())
+  details         Json?
+
+  transaction Transaction? @relation(fields: [transaction_id], references: [id], onDelete: Restrict)
+
+  @@index([transaction_id])
+  @@index([correlation_id])
+  @@map("audit_events")
+}
+
+// ---------------------------------------------------------------------------
+// WhatsApp message log — idempotency + template-approval separation
+// ---------------------------------------------------------------------------
+
+model MessageLog {
+  id                   String           @id @default(uuid()) @db.Uuid
+  // UNIQUE = idempotency key. A duplicate webhook event carrying an
+  // already-logged whatsapp_message_id must be processed with NO
+  // duplicate effect (Sprint 2 Guard + unique-violation handling).
+  whatsapp_message_id  String           @unique
+  transaction_id       String?          @db.Uuid
+  direction            MessageDirection
+  template_name        String?
+  // Shown SEPARATELY from Meta approval. Local APPROVED + Meta REJECTED
+  // => UN-SENDABLE. The rejection reason lives in
+  // template_rejection_reason and must be visible to staff.
+  template_local_approval TemplateApproval?
+  template_meta_approval  TemplateApproval?
+  template_rejection_reason String?
+  status               MessageStatus    @default(QUEUED)
+  // Dry-run labelling: true => this row is a SIMULATION. It must be
+  // labelled "dry-run" everywhere it is displayed, and must never be
+  // counted or described as a message actually sent.
+  is_dry_run           Boolean          @default(false)
+  sent_at              DateTime?
+  delivered_at         DateTime?
+  read_at              DateTime?
+
+  transaction Transaction? @relation(fields: [transaction_id], references: [id], onDelete: Restrict)
+
+  @@map("message_logs")
+}
+
+// ---------------------------------------------------------------------------
+// RBAC — staff only, backend-enforced (403 on violation, never UI-only).
+// Passwords are stored ONLY as argon2id hashes in StaffUser.password_hash.
+// No plaintext password, token, or secret value is ever stored here.
+// Role / Permission ROWS are created by an administrator in Sprint 3;
+// this schema defines the tables only and seeds NOTHING, so no demo
+// role, user, or permission is auto-created by a migration.
+// ---------------------------------------------------------------------------
+
+model StaffUser {
+  id            String   @id @default(uuid()) @db.Uuid
+  email         String   @unique
+  // argon2id hash ONLY (CORE PROMPT §14.1). Never a plaintext password.
+  password_hash String
+  display_name  String?
+  is_active     Boolean  @default(true)
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  roles                StaffUserRole[]
+  coordination_records FinancialCoordinationRecord[]
+  settlement_summaries SettlementSummary[]
+
+  @@map("staff_users")
+}
+
+model Role {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique
+  description String?
+  created_at  DateTime @default(now())
+
+  // NOTE: Role <-> Permission is a many-to-many through RolePermission
+  // below (there is no direct Role.permissions relation), and
+  // StaffUser <-> Role is many-to-many through StaffUserRole.
+  role_permissions RolePermission[]
+  staff_user_roles StaffUserRole[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String   @id @default(uuid()) @db.Uuid
+  // Permission names used by Sprint 2 Guards (examples, enforced in
+  // backend code, not by this schema alone): transactions.create,
+  // transactions.submit_review, transactions.accept_contract,
+  // transactions.issue_voucher, transactions.confirm_funding,
+  // transactions.start_fulfilment, transactions.record_delivery,
+  // transactions.record_receipt, transactions.prepare_settlement,
+  // transactions.record_settlement, transactions.open_dispute,
+  // transactions.resolve_dispute, transactions.record_refund,
+  // transactions.complete, transactions.cancel, audit.view,
+  // users.approve, users.suspend.
+  name        String   @unique
+  description String?
+  created_at  DateTime @default(now())
+
+  role_permissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  id            String @id @default(uuid()) @db.Uuid
+  role_id       String @db.Uuid
+  permission_id String @db.Uuid
+
+  role       Role       @relation(fields: [role_id], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permission_id], references: [id], onDelete: Cascade)
+
+  @@unique([role_id, permission_id])
+  @@map("role_permissions")
+}
+
+model StaffUserRole {
+  id           String @id @default(uuid()) @db.Uuid
+  staff_user_id String @db.Uuid
+  role_id      String @db.Uuid
+
+  staff_user StaffUser @relation(fields: [staff_user_id], references: [id], onDelete: Cascade)
+  role       Role      @relation(fields: [role_id], references: [id], onDelete: Cascade)
+
+  @@unique([staff_user_id, role_id])
+  @@map("staff_user_roles")
+}
