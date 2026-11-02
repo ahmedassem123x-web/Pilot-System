@@ -340,7 +340,14 @@ export default function Inbox(props: InboxProps) {
               rows.push(<p key={`date-${message.date}`}>— {message.date} —</p>);
             }
             rows.push(
-              <div key={message.id}>
+              <div
+                key={message.id}
+                className={
+                  message.direction === 'OUTBOUND'
+                    ? 'wa-msg wa-out'
+                    : 'wa-msg wa-in'
+                }
+              >
                 <p>
                   {message.direction === 'INBOUND' ? 'Customer' : 'Staff'}
                   {message.isDryRun ? ' — dry-run' : ''}
