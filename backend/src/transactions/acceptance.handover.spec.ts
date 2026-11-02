@@ -87,11 +87,22 @@ describe('Sold as Seen handover', () => {
       'HANDOVER_INSPECTION_COMPLETED',
       actor.id,
     );
-    env.txs.recordHandoverAcceptance(
-      delivered.tx.id,
-      'waba-handover-exception',
-      delivered.buyer.id,
-    );
+    // Post-UAT fix (D1 option b): the acceptance RECORD itself is
+    // rejected while the exception is unresolved — no 201-equivalent,
+    // no MessageLog, no acceptance record — and the guarded transition
+    // is independently rejected. (Previously this test recorded the
+    // acceptance and only the transition was rejected; that 201 was
+    // the UAT-D1 defect.)
+    expect(() =>
+      env.txs.recordHandoverAcceptance(
+        delivered.tx.id,
+        'waba-handover-exception',
+        delivered.buyer.id,
+      ),
+    ).toThrow(DomainError);
+    expect(
+      env.store.findMessageLogByWhatsappId('waba-handover-exception'),
+    ).toBeUndefined();
     expect(() =>
       env.txs.transition(delivered.tx.id, actor, 'RECEIPT_CONFIRMED'),
     ).toThrow(DomainError);
