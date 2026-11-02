@@ -10,6 +10,7 @@ import { RbacService } from './rbac.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { PermissionsGuard } from './permissions.guard';
 import { AuthController } from './auth.controller';
+import { BootstrapService } from './bootstrap.service';
 
 @Module({
   providers: [
@@ -33,6 +34,15 @@ import { AuthController } from './auth.controller';
       provide: PermissionsGuard,
       useFactory: (reflector: Reflector) => new PermissionsGuard(reflector),
       inject: [Reflector],
+    },
+    {
+      provide: BootstrapService,
+      useFactory: (
+        store: InMemoryStore,
+        auth: AuthService,
+        rbac: RbacService,
+      ) => new BootstrapService(store, auth, rbac),
+      inject: [InMemoryStore, AuthService, RbacService],
     },
   ],
   controllers: [AuthController],
