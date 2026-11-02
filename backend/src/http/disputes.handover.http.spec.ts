@@ -199,14 +199,17 @@ describe('disputes + Sold-as-Seen over HTTP (Sprint 3)', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ eventType: 'HANDOVER_INSPECTION_COMPLETED' })
       .expect(201);
-    await request(server)
+    // Post-UAT fix (D1 option b): the acceptance endpoint itself is
+    // rejected while the exception is unresolved — not 201.
+    const rejectedAccept = await request(server)
       .post(`/api/transactions/${ctx.txId}/handover-acceptance`)
       .set('Authorization', `Bearer ${token}`)
       .send({
         whatsappMessageId: `waba-dh-accept-${next()}`,
         buyerUserId: ctx.buyerId,
       })
-      .expect(201);
+      .expect(422);
+    expect(rejectedAccept.body.code).toBe('UNRESOLVED_HANDOVER_EXCEPTION');
     // Acceptance is blocked while the exception is unresolved.
     const blocked = await go(env, token, ctx.txId, { to: 'RECEIPT_CONFIRMED' }, 422);
     expect(blocked.body.code).toBe('GUARD_FAILED');
@@ -216,6 +219,16 @@ describe('disputes + Sold-as-Seen over HTTP (Sprint 3)', () => {
       .post(`/api/transactions/${ctx.txId}/operational-exception/resolve`)
       .set('Authorization', `Bearer ${token}`)
       .send({})
+      .expect(201);
+    // The rejected attempt recorded nothing, so acceptance is recorded
+    // fresh after resolution, then the transition succeeds.
+    await request(server)
+      .post(`/api/transactions/${ctx.txId}/handover-acceptance`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        whatsappMessageId: `waba-dh-accept-${next()}`,
+        buyerUserId: ctx.buyerId,
+      })
       .expect(201);
     await go(env, token, ctx.txId, { to: 'RECEIPT_CONFIRMED' });
     expect(await stateOf(env, token, ctx.txId)).toBe('RECEIPT_CONFIRMED');
