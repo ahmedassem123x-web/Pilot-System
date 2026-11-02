@@ -137,6 +137,19 @@ enum DisputeStatus {
   RESOLVED
 }
 
+// Post-UAT fix for observation OBS-1: follow-up cases are staff work
+// only. A case is created when a beneficiary change from a WhatsApp
+// message alone is rejected; it changes NO transaction state, NO money,
+// and NO beneficiary. Only BENEFICIARY_DISCREPANCY exists at this stage.
+enum FollowUpCaseType {
+  BENEFICIARY_DISCREPANCY
+}
+
+enum FollowUpCaseStatus {
+  OPEN
+  RESOLVED
+}
+
 // Outcome recorded by the HUMAN resolver. It is not a state transition by
 // itself: the resolver's outcome decides which allowed transition (see
 // docs/transition-matrix.md) may follow, and the transition Guard checks it.
@@ -250,6 +263,7 @@ model Transaction {
   coordination_records  FinancialCoordinationRecord[]
   delivery_events       DeliveryEvent[]
   disputes              Dispute[]
+  follow_up_cases       FollowUpCase[]
   settlement_summaries  SettlementSummary[]
   audit_events          AuditEvent[]
   message_logs          MessageLog[]
@@ -409,6 +423,23 @@ model Dispute {
 // WhatsApp message alone. Any discrepancy = follow-up case until the
 // institution completes its approved verification.
 // ---------------------------------------------------------------------------
+
+model FollowUpCase {
+  id             String             @id @default(uuid()) @db.Uuid
+  transaction_id String             @db.Uuid
+  type           FollowUpCaseType
+  status         FollowUpCaseStatus @default(OPEN)
+  details        String
+  created_by     String             @db.Uuid
+  created_at     DateTime           @default(now())
+  resolved_by    String?            @db.Uuid
+  resolved_at    DateTime?
+  resolution     String?
+
+  transaction Transaction @relation(fields: [transaction_id], references: [id], onDelete: Restrict)
+
+  @@map("follow_up_cases")
+}
 
 model SettlementSummary {
   id                              String    @id @default(uuid()) @db.Uuid
