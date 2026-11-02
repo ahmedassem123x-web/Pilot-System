@@ -141,6 +141,27 @@ export interface Dispute {
   updated_at: Date;
 }
 
+/**
+ * Post-UAT fix for observation OBS-1: a DEDICATED follow-up case.
+ * Created ONLY when a beneficiary change from a WhatsApp message alone
+ * is rejected (settlement path D2). A case is staff work, never a
+ * transaction change: it changes NO transaction state, NO money, and
+ * NO beneficiary. Resolution is a human staff decision recorded with
+ * resolution text + an audit event.
+ */
+export interface FollowUpCase {
+  id: string;
+  transaction_id: string;
+  type: 'BENEFICIARY_DISCREPANCY';
+  status: 'OPEN' | 'RESOLVED';
+  details: string;
+  created_by: string;
+  created_at: Date;
+  resolved_by: string | null;
+  resolved_at: Date | null;
+  resolution: string | null;
+}
+
 export interface SettlementSummary {
   id: string;
   transaction_id: string;
@@ -255,6 +276,13 @@ export interface CreateDisputeInput {
   evidence_file_ids: string[];
 }
 
+export interface CreateFollowUpCaseInput {
+  transaction_id: string;
+  type: FollowUpCase['type'];
+  details: string;
+  created_by: string;
+}
+
 export interface CreateSettlementSummaryInput {
   transaction_id: string;
   deposit_reference: string;
@@ -315,6 +343,7 @@ export interface StoreSnapshot {
   coordinations: FinancialCoordinationRecord[];
   deliveryEvents: DeliveryEvent[];
   disputes: Dispute[];
+  followUpCases: FollowUpCase[];
   settlementSummaries: SettlementSummary[];
   messageLogs: MessageLog[];
 }
@@ -391,6 +420,14 @@ export interface Store {
   createDispute(input: CreateDisputeInput): Dispute;
   disputesForTransaction(transactionId: string): Dispute[];
   updateDispute(id: string, patch: Partial<Dispute>): Dispute;
+  // Follow-up cases (OBS-1): staff work only, never a state/money change.
+  createFollowUpCase(input: CreateFollowUpCaseInput): FollowUpCase;
+  followUpCasesForTransaction(transactionId: string): FollowUpCase[];
+  findFollowUpCaseById(id: string): FollowUpCase | undefined;
+  updateFollowUpCase(
+    id: string,
+    patch: Partial<FollowUpCase>,
+  ): FollowUpCase;
   createSettlementSummary(
     input: CreateSettlementSummaryInput,
   ): SettlementSummary;
