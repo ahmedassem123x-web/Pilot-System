@@ -1,12 +1,18 @@
-# Pilot System — never commit secrets or test data
-.env
-**/data.json
-data.json
+# Dependencies and build output
 node_modules/
-.DS_Store
-*.log
-dist/
+backend/dist/
+backend/coverage/
 frontend/dist/
-uploads/
+frontend/coverage/
 
-*.ttf
+# Environment files — NEVER commit real values.
+# Only the .example files (names only) are committed.
+.env
+.env.*
+!.env.example
+!.env.development.example
+!.env.production.example
+
+# Logs and editor files
+*.log
+.DS_Store
