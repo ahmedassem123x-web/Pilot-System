@@ -1,0 +1,247 @@
+/* Pilot System v3.1 — staff panel, WhatsApp-familiar styling.
+   No behaviour lives here: colours and layout only. The panel is
+   staff-only, records and reviews only, and never moves money. */
+
+:root {
+  --wa-header: #075e54;
+  --wa-header-dark: #054c44;
+  --wa-accent: #128c7e;
+  --wa-accent-light: #25d366;
+  --wa-chat-bg: #ece5dd;
+  --wa-outgoing: #dcf8c6;
+  --wa-incoming: #ffffff;
+  --wa-panel: #f0f2f5;
+  --wa-text: #111b21;
+  --wa-muted: #667781;
+  --wa-tick-read: #53bdeb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  color: var(--wa-text);
+  background: var(--wa-panel);
+}
+
+main {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 0 12px 32px;
+}
+
+main > h1 {
+  background: var(--wa-header);
+  color: #fff;
+  margin: 0 -12px 0;
+  padding: 18px 20px;
+  font-size: 1.25rem;
+}
+
+main > p {
+  color: var(--wa-muted);
+}
+
+.wa-login {
+  background: #fff;
+  border: 1px solid #d9dee2;
+  border-radius: 12px;
+  padding: 12px 16px;
+  margin: 16px 0;
+}
+
+.wa-login form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: end;
+}
+
+.wa-login input {
+  padding: 8px 10px;
+  border: 1px solid #c9d1d6;
+  border-radius: 8px;
+  font-size: 1rem;
+}
+
+button {
+  background: var(--wa-accent);
+  color: #fff;
+  border: none;
+  border-radius: 20px;
+  padding: 8px 16px;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+button[aria-pressed='true'] {
+  background: var(--wa-header);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+nav[aria-label='Operations sections'] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+nav[aria-label='Operations sections'] button {
+  background: #fff;
+  color: var(--wa-text);
+  border: 1px solid #d9dee2;
+}
+
+nav[aria-label='Operations sections'] button[aria-pressed='true'] {
+  background: var(--wa-header);
+  color: #fff;
+  border-color: var(--wa-header);
+}
+
+section {
+  background: #fff;
+  border: 1px solid #d9dee2;
+  border-radius: 12px;
+  padding: 16px;
+  margin: 12px 0;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th {
+  background: var(--wa-header);
+  color: #fff;
+  text-align: start;
+  padding: 8px;
+}
+
+td {
+  border-bottom: 1px solid #e6e9ec;
+  padding: 8px;
+}
+
+/* WhatsApp inbox triptych: list | chat | details on desktop. */
+section[aria-label='Conversation list'],
+section[aria-label='Chat'],
+section[aria-label='Details'] {
+  border-radius: 0;
+  margin: 0;
+}
+
+div:has(> section[aria-label='Conversation list']) {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid #d9dee2;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #fff;
+}
+
+section[aria-label='Conversation list'] {
+  flex: 0 0 300px;
+  border: none;
+  border-inline-end: 1px solid #e6e9ec;
+  overflow-y: auto;
+  max-height: 70vh;
+}
+
+section[aria-label='Chat'] {
+  flex: 1 1 auto;
+  border: none;
+  background: var(--wa-chat-bg);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+section[aria-label='Chat'] > div:first-of-type {
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+
+section[aria-label='Details'] {
+  flex: 0 0 280px;
+  border: none;
+  border-inline-start: 1px solid #e6e9ec;
+  overflow-y: auto;
+  max-height: 70vh;
+}
+
+section[aria-label='Conversation list'] ul {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+}
+
+section[aria-label='Conversation list'] li button {
+  width: 100%;
+  text-align: start;
+  background: #fff;
+  color: var(--wa-text);
+  border: none;
+  border-bottom: 1px solid #f0f2f5;
+  border-radius: 0;
+  padding: 12px;
+}
+
+section[aria-label='Conversation list'] li button[aria-pressed='true'] {
+  background: #f0f2f5;
+}
+
+/* Chat bubbles: staff on the right (green), customer on the left. */
+.wa-msg {
+  max-width: 75%;
+  margin: 6px 0;
+  padding: 8px 12px 6px;
+  border-radius: 12px;
+  box-shadow: 0 1px 1px rgb(0 0 0 / 0.12);
+}
+
+.wa-msg.wa-in {
+  background: var(--wa-incoming);
+  margin-inline-end: auto;
+  border-start-start-radius: 2px;
+}
+
+.wa-msg.wa-out {
+  background: var(--wa-outgoing);
+  margin-inline-start: auto;
+  border-start-end-radius: 2px;
+}
+
+.wa-msg p {
+  margin: 2px 0;
+}
+
+.wa-msg p:first-child {
+  color: var(--wa-muted);
+  font-size: 0.8rem;
+}
+
+@media (max-width: 820px) {
+  div:has(> section[aria-label='Conversation list']) {
+    flex-direction: column;
+  }
+
+  section[aria-label='Conversation list'],
+  section[aria-label='Details'] {
+    flex-basis: auto;
+    max-height: none;
+    border-inline-end: none;
+    border-bottom: 1px solid #e6e9ec;
+  }
+
+  .wa-msg {
+    max-width: 88%;
+  }
+}
