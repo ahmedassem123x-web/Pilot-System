@@ -260,6 +260,29 @@ export class TransactionsService {
     });
   }
 
+  /**
+   * Post-UAT fix for defect UAT-D1 (option (b), the stricter reading):
+   * while a product-absent operational exception is unresolved,
+   * accept/reject are NOT available at handover (UAT script E1/E2).
+   * The endpoint therefore rejects BEFORE recording anything: no
+   * MessageLog row and no BUYER_HANDOVER_ACCEPT audit row are created
+   * by a rejected attempt, so staff can never mistake a 201 for an
+   * effective acceptance. The guarded transition to RECEIPT_CONFIRMED
+   * is independently rejected by the same exception count, and state
+   * stays DELIVERED.
+   */
+  hasUnresolvedProductAbsentException(transactionId: string): boolean {
+    const events = this.store.deliveryEventsForTransaction(transactionId);
+    const audits = this.store.auditForTransaction(transactionId);
+    const exceptions = events.filter(
+      (e) => e.event_type === 'OPERATIONAL_EXCEPTION_PRODUCT_ABSENT',
+    ).length;
+    const resolutions = audits.filter(
+      (a) => a.action === 'OPERATIONAL_EXCEPTION_RESOLVED',
+    ).length;
+    return exceptions > resolutions;
+  }
+
   recordHandoverAcceptance(
     transactionId: string,
     whatsappMessageId: string,
@@ -267,6 +290,28 @@ export class TransactionsService {
     correlationId?: string,
   ): void {
     const tx = this.requireTransaction(transactionId);
+    if (this.hasUnresolvedProductAbsentException(transactionId)) {
+      this.audit.record({
+        correlationId,
+        transactionId,
+        actorId: buyerUserId,
+        actorRole: 'BUYER',
+        action: 'HANDOVER_ACCEPTANCE_REJECTED',
+        previousState: tx.state,
+        newState: null,
+        details: {
+          code: 'UNRESOLVED_HANDOVER_EXCEPTION',
+          reason:
+            'Unresolved product-absent operational exception blocks acceptance: accept/reject are not available until the exception is resolved and a real handover occurs',
+          whatsapp_message_id: whatsappMessageId,
+        },
+      });
+      throw new DomainError(
+        'UNRESOLVED_HANDOVER_EXCEPTION',
+        422,
+        'Unresolved product-absent operational exception blocks acceptance: accept/reject are not available until the exception is resolved and a real handover occurs',
+      );
+    }
     this.store.createMessageLog({
       whatsapp_message_id: whatsappMessageId,
       transaction_id: transactionId,
@@ -512,6 +557,53 @@ export class TransactionsService {
     return dispute;
   }
 
+  // -- Follow-up cases (OBS-1) -------------------------------------------------
+  /**
+   * Staff-only follow-up work. Listing and resolving a case never
+   * changes transaction state, money, or a beneficiary — resolution is
+   * a human decision recorded with text + an audit event.
+   */
+  listFollowUpCases(transactionId: string) {
+    this.requireTransaction(transactionId);
+    return this.store.followUpCasesForTransaction(transactionId);
+  }
+
+  resolveFollowUpCase(
+    caseId: string,
+    input: { resolution: string; resolvedBy: string; correlationId?: string },
+  ) {
+    const followUpCase = this.store.findFollowUpCaseById(caseId);
+    if (!followUpCase) throw new NotFoundError('FollowUpCase', caseId);
+    if (followUpCase.status !== 'OPEN') {
+      throw new GuardFailedError('Follow-up case is already resolved');
+    }
+    if (!input.resolution) {
+      throw new GuardFailedError('Follow-up resolution text is required');
+    }
+    const tx = this.requireTransaction(followUpCase.transaction_id);
+    const resolved = this.store.updateFollowUpCase(caseId, {
+      status: 'RESOLVED',
+      resolution: input.resolution,
+      resolved_by: input.resolvedBy,
+      resolved_at: new Date(),
+    });
+    this.audit.record({
+      correlationId: input.correlationId,
+      transactionId: followUpCase.transaction_id,
+      actorId: input.resolvedBy,
+      actorRole: 'STAFF',
+      action: 'FOLLOW_UP_CASE_RESOLVED',
+      previousState: tx.state,
+      newState: null,
+      details: {
+        follow_up_case_id: resolved.id,
+        type: resolved.type,
+        resolution: input.resolution,
+      },
+    });
+    return resolved;
+  }
+
   // -- Amendment policy (PB-10) ------------------------------------------------
   /**
    * Routes an amendment request by the transaction's current state:
@@ -626,7 +718,26 @@ export class TransactionsService {
     try {
       this.checkGuard(row.action, tx, actor, input, to);
     } catch (error) {
-      if (error instanceof DomainError) return reject(error);
+      if (error instanceof DomainError) {
+        // OBS-1: a beneficiary change from a WhatsApp message alone is
+        // rejected AND becomes a dedicated follow-up case. The case
+        // changes NO transaction state, NO money, NO beneficiary; the
+        // rejection itself is still recorded by reject() as exactly
+        // one TRANSITION_REJECTED audit row, and the Guard code stays
+        // GUARD_FAILED so existing D2 expectations are unchanged.
+        if (input.beneficiaryChangedFromWhatsappMessage === true) {
+          const attempted =
+            input.settlementSummary?.beneficiary_name ??
+            'beneficiary change attempted from a WhatsApp message alone';
+          this.store.createFollowUpCase({
+            transaction_id: transactionId,
+            type: 'BENEFICIARY_DISCREPANCY',
+            details: `Beneficiary/destination change rejected: attempted beneficiary "${attempted}" was supplied from a WhatsApp message alone and must never change a beneficiary. Follow up with staff and the institution; do not use the attempted value.`,
+            created_by: actor.id,
+          });
+        }
+        return reject(error);
+      }
       throw error;
     }
 
