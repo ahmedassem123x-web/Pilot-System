@@ -22,4 +22,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY vite.config.ts ./
 EXPOSE 5173
-CMD ["npx", "vite", "preview", "--host", "0.0.0.0", "--port", "5173"]
+# Render assigns its own PORT to a web service; preview must listen on
+# $PORT when Render sets it, otherwise Render cannot detect the service
+# and marks the deploy failed even though preview is running on 5173.
+CMD ["sh", "-c", "npx vite preview --host 0.0.0.0 --port ${PORT:-5173}"]
