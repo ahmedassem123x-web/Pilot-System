@@ -1,331 +1,677 @@
-import { useCallback, useEffect, useState } from 'react';
-import { api, clearToken, getToken, setToken } from './api';
-import {
-  Audit, Automation, Contacts, ContractVersions, Contracts, Dashboard, Inbox, NoPermission,
-  SystemSettings, Tasks, Templates, Users, WhatsApp, WhatsAppMedia, hasAction, hasSection, type Bundle,
-} from './views';
-import { WorkflowDesigner } from './workflow';
-import { AIWorkspace, ApiPage, AutoReplies, BillingPage, ChatWidgetPage, ContactLists, Distribution, FeedbackPage, HandoffPage, IntegrationsPage, MyTickets, QASettings, SegmentsPage, TagsPage, TeamPerformance, UserInputResponses, WebhookPage, WhatsAppConversions, WhatsAppInsights, WhatsAppOverview } from './mazbot-sections';
-import { Sidebar, type MainTab as SideTab } from './sidebar';
-import { type MeUser } from './types';
-import {
-  IconBolt, IconChat, IconCheckSquare, IconDoc, IconGrid, IconInbox, IconLink, IconReport,
-  IconSettings, IconShield, IconTemplate, IconUsers, IconWorkflow,
-} from './icons';
+// Pilot System v3.1 — Sprint 3 (PB-15, PB-21). ONE lightweight,
+// staff-only operations panel.
+//
+// WHAT THIS PANEL DOES: lifecycle view, contract/evidence review,
+// payment-evidence review, verification request + manual
+// communication record, institution confirmation + deposit reference
+// record, manual settlement summary, settlement/refund outcome AFTER
+// external confirmation, dispute/exception follow-up, audit view,
+// user approve/suspend, Sold-as-Seen handover recording, templates
+// and messages (dry-run labelled).
+//
+// WHAT THIS PANEL NEVER OFFERS (and no endpoint behind it offers
+// either — see the backend forbidden-endpoints spec): it never moves
+// or executes money, never confirms funding without institution
+// confirmation, never overrides an institution outcome, never creates
+// a financial account, never changes a beneficiary from a message,
+// never imposes acceptance, never closes on behalf of a buyer, and
+// never amends a contract after shipping. If a button for such an
+// action appears here, it is a defect.
+//
+// BACKEND CONNECTION: pass apiBaseUrl (Vite env VITE_API_BASE_URL)
+// and authToken to actually record. Without a base URL, forms show a
+// "backend not connected" notice and SEND NOTHING — they never fake
+// a success. Transaction amounts shown here are DESCRIPTIVE ONLY.
+import { useState } from 'react';
+import type { FormEvent } from 'react';
+import Inbox from './Inbox';
 
-type MainTab = 'dashboard' | 'contracts' | 'inbox' | 'whatsapp' | 'automation' | 'ai' | 'team' | 'tickets' | 'feedback' | 'users' | 'audit' | 'settings';
-interface Sub { id: string; label: string; section?: string; action?: string; }
-interface NavItem { id: MainTab; label: string; section: string; icon: (p: { className?: string }) => React.ReactElement; subs: Sub[]; }
-const NAV: NavItem[] = [
-  { id: 'dashboard', label: 'لوحة القيادة', section: 'dashboard', icon: IconGrid, subs: [] },
-  { id: 'contracts', label: 'العقود', section: 'contracts', icon: IconDoc, subs: [
-    { id: 'list', label: 'قائمة العقود' },
-    { id: 'new', label: 'عقد جديد', action: 'create' },
-    { id: 'versions', label: 'النسخ' },
-    { id: 'tasks', label: 'مهام التشغيل', section: 'tasks' },
-  ] },
-  // Round 3: Inbox is ONE entry with NO sub-tabs. The old pills
-  // (المحادثات / عرض الدردشة / المعيّنة لي / الملاحظات الداخلية) were
-  // DELETED — their filters live inside the triptych list header now.
-  { id: 'inbox', label: 'الإنبكس والدردشة', section: 'inbox', icon: IconChat, subs: [] },
-  // Professional hierarchy (Pass 3): ONE entry per screen. Inbox lives only
-  // under the Inbox tab, Automation only under Automation, linking only
-  // under WhatsApp > connection. WhatsApp subs are only what WhatsApp owns.
-  { id: 'whatsapp', label: 'واتساب', section: 'whatsapp', icon: IconLink, subs: [
-    { id: 'overview', label: 'نظرة عامة' },
-    { id: 'insights', label: 'رؤى التسليم' },
-    { id: 'conversions', label: 'تحويلات العقود' },
-    { id: 'lists', label: 'قوائم جهات الاتصال' },
-    { id: 'segments', label: 'الشرائح' },
-    { id: 'tags', label: 'الوسوم' },
-    { id: 'contacts', label: 'جهات الاتصال' },
-    { id: 'auto-replies', label: 'الردود التلقائية' },
-    { id: 'designer', label: 'منشئ التدفقات' },
-    { id: 'user-input', label: 'ردود إدخال المستخدم' },
-    { id: 'handoff', label: 'التحويل البشري' },
-    { id: 'templates', label: 'القوالب' },
-    { id: 'chat-widget', label: 'أداة الدردشة' },
-    { id: 'connection', label: 'الربط والحسابات' },
-    { id: 'media', label: 'الوسائط' },
-    { id: 'settings', label: 'إعدادات واتساب' },
-  ] },
-  { id: 'automation', label: 'الأتمتة', section: 'automation', icon: IconBolt, subs: [
-    { id: 'rules', label: 'القواعد' },
-    { id: 'killswitch', label: 'مفتاح الإيقاف' },
-  ] },
-  // Round 3 expanded brief (MazBot hierarchy, adapted): AI gated by
-  // automation permission, Team by users, Tickets by tasks, Feedback by
-  // audit — so no permission-system change is needed for new sections.
-  { id: 'ai', label: 'مساعد الذكاء الاصطناعي', section: 'automation', icon: IconWorkflow, subs: [
-    { id: 'dashboard', label: 'لوحة المساعد' },
-    { id: 'credits', label: 'الأرصدة' },
-    { id: 'settings', label: 'إعدادات المساعد' },
-    { id: 'agents', label: 'الوكلاء' },
-    { id: 'test-chat', label: 'دردشة الاختبار' },
-    { id: 'quotas', label: 'الحصص' },
-    { id: 'triggers', label: 'المشغّلات' },
-    { id: 'business-hours', label: 'ساعات العمل' },
-    { id: 'knowledge-base', label: 'قاعدة المعرفة' },
-  ] },
-  { id: 'team', label: 'الفريق', section: 'users', icon: IconUsers, subs: [
-    { id: 'members', label: 'أعضاء الفريق' },
-    { id: 'performance', label: 'الأداء والمؤشرات' },
-    { id: 'distribution', label: 'توزيع المهام' },
-    { id: 'qa', label: 'إعدادات الجودة' },
-  ] },
-  { id: 'tickets', label: 'تذاكري', section: 'tasks', icon: IconInbox, subs: [] },
-  { id: 'feedback', label: 'أفكار وملاحظات', section: 'audit', icon: IconChat, subs: [] },
-  { id: 'users', label: 'المستخدمون', section: 'users', icon: IconUsers, subs: [
-    { id: 'list', label: 'قائمة المستخدمين' },
-    { id: 'add', label: 'إضافة مستخدم' },
-    { id: 'passwords', label: 'كلمات السر' },
-    { id: 'permissions', label: 'الصلاحيات' },
-    { id: 'departments', label: 'الأقسام' },
-  ] },
-  { id: 'audit', label: 'التدقيق والتقارير', section: 'audit', icon: IconReport, subs: [] },
-  { id: 'settings', label: 'إعدادات النظام', section: 'settings', icon: IconSettings, subs: [
-    { id: 'system', label: 'إعدادات عامة' },
-    { id: 'billing', label: 'تفاصيل الفوترة' },
-    { id: 'webhook', label: 'Webhook' },
-    { id: 'api', label: 'API' },
-    { id: 'integrations', label: 'التكاملات' },
-  ] },
-];
-const EMPTY: Bundle = { contracts: [], conversations: [], messages: [], tasks: [], workflows: [], templates: [], users: [], audit: [], killSwitch: false, healthOk: false };
-const MAIN_IDS = NAV.map((n) => n.id);
-
-function parseHash(): { main: MainTab; sub: string } {
-  const parts = location.hash.replace('#', '').split('/');
-  const main = (MAIN_IDS.includes(parts[0] as MainTab) ? parts[0] : 'dashboard') as MainTab;
-  const nav = NAV.find((n) => n.id === main)!;
-  const sub = nav.subs.some((s) => s.id === parts[1]) ? parts[1] : (nav.subs[0]?.id || '');
-  return { main, sub };
+export interface PanelMessage {
+  id: string;
+  direction: 'INBOUND' | 'OUTBOUND';
+  templateName: string | null;
+  localApproval: string | null;
+  metaApproval: string | null;
+  rejectionReason: string | null;
+  status: string;
+  isDryRun: boolean;
 }
 
-// Phone top tabs (Preview list, verbatim) + the two extra pills (audit,
-// system settings) that keep every existing section reachable on phone.
-// Visibility is permission-gated exactly like the sidebar (hasSection).
-interface TopTab { key: string; label: string; icon: (p: { className?: string }) => React.ReactElement; main: MainTab; sub?: string; section: string; }
-const TOP_TABS: TopTab[] = [
-  { key: 'dashboard', label: 'لوحة القيادة', icon: IconGrid, main: 'dashboard', section: 'dashboard' },
-  { key: 'contracts', label: 'العقود والمعاملات', icon: IconDoc, main: 'contracts', sub: 'list', section: 'contracts' },
-  { key: 'inbox', label: 'الإنبكس', icon: IconChat, main: 'inbox', section: 'inbox' },
-  { key: 'whatsapp', label: 'واتساب', icon: IconLink, main: 'whatsapp', sub: 'overview', section: 'whatsapp' },
-  { key: 'automation', label: 'الأتمتة والتقارير', icon: IconBolt, main: 'automation', sub: 'rules', section: 'automation' },
-  { key: 'users', label: 'المستخدمون والأدوار', icon: IconUsers, main: 'users', sub: 'list', section: 'users' },
-  { key: 'audit', label: 'التدقيق', icon: IconReport, main: 'audit', section: 'audit' },
-  { key: 'settings', label: 'إعدادات النظام', icon: IconSettings, main: 'settings', sub: 'system', section: 'settings' },
-];
-function activeTopKey(main: MainTab, _sub: string): string {
-  // Phone tabs are MAIN tabs only (dedupe fix): subsections are reached
-  // once, via the expanded sidebar on web and the single section dropdown
-  // on phone — never as extra phone tabs and never as a pill row.
-  return main;
+export interface PanelTemplate {
+  name: string;
+  localApproval: string;
+  metaApproval: string;
+  rejectionReason: string | null;
 }
 
-export default function App() {
-  const [me, setMe] = useState<MeUser | null>(null);
-  const [authChecked, setAuthChecked] = useState(false);
-  const [loginForm, setLoginForm] = useState({ email: '', password: '' });
-  const [loginErr, setLoginErr] = useState('');
-  const [loggingIn, setLoggingIn] = useState(false);
-  const [{ main, sub }, setNav] = useState(parseHash);
-  const [data, setData] = useState<Bundle>(EMPTY);
-  const [err, setErr] = useState('');
-  // Sidebar V2: collapsed rail persisted; phone never uses it (CSS).
-  const [sideCollapsed, setSideCollapsed] = useState(() => {
-    try { return localStorage.getItem('ps:sidebar-collapsed') === '1'; } catch { return false; }
-  });
-  function toggleSideCollapsed() {
-    setSideCollapsed((v) => {
-      try { localStorage.setItem('ps:sidebar-collapsed', v ? '0' : '1'); } catch { /* storage unavailable */ }
-      return !v;
-    });
-  }
-  // Keep the active phone tab scrolled into view (scroll hint + snap).
-  useEffect(() => {
-    const el = document.querySelector('.topnav .tab.active');
-    if (el) (el as HTMLElement).scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' });
-  }, [main, sub]);
+export interface PanelTransaction {
+  id: string;
+  state: string;
+  amount: number;
+  currency: string;
+  productDescription: string;
+  quantity: number;
+  deliveryPoint: string;
+  contractVersions: Array<{ versionNumber: number; contentHash: string }>;
+  evidences: Array<{
+    channel: string;
+    senderName: string;
+    beneficiaryNameAsShown: string | null;
+    amount: number;
+    currency: string;
+    externalPaymentReference: string;
+    status: string;
+  }>;
+  coordination: Array<{
+    contactMethod: string;
+    institutionResponse: string | null;
+    depositReference: string | null;
+    settlementReference: string | null;
+    institutionConfirmed: boolean;
+  }>;
+  deliveryEvents: Array<{ eventType: string; note: string | null }>;
+  disputes: Array<{
+    reason: string;
+    status: string;
+    resolution: string | null;
+    resolutionOutcome: string | null;
+  }>;
+  settlementSummaries: Array<{
+    id: string;
+    depositReference: string;
+    settlementReference: string;
+    amount: number;
+    currency: string;
+    beneficiaryName: string;
+  }>;
+  audit: Array<{
+    action: string;
+    previousState: string | null;
+    newState: string | null;
+    actorRole: string;
+  }>;
+  messages: PanelMessage[];
+  templates: PanelTemplate[];
+  users: Array<{ id: string; whatsappNumber: string; status: string }>;
+}
 
-  const reload = useCallback(async () => {
+export interface OperationsPanelProps {
+  initialTransaction?: PanelTransaction | null;
+  apiBaseUrl?: string;
+  authToken?: string;
+}
+
+const STATES = [
+  'DRAFT',
+  'PENDING_REVIEW',
+  'ACCEPTED',
+  'AWAITING_FUNDING_CONFIRMATION',
+  'FUNDED_CONFIRMED',
+  'IN_FULFILMENT',
+  'DELIVERED',
+  'RECEIPT_CONFIRMED',
+  'SETTLEMENT_PENDING',
+  'SETTLED',
+  'DISPUTED',
+  'REFUND_PENDING',
+  'REFUNDED',
+  'COMPLETED',
+  'CANCELLED',
+];
+
+const TABS = [
+  'Lifecycle',
+  'Evidence',
+  'Verification',
+  'Institution',
+  'Settlement',
+  'Disputes',
+  'Handover',
+  'Inbox',
+  'Messages',
+  'Audit',
+  'Users',
+] as const;
+
+type Tab = (typeof TABS)[number];
+
+// Sold-as-Seen handover, exact sequence (CORE PROMPT §9). Step 4 is
+// the product-absent exception: state stays DELIVERED, and no
+// accept/reject is available until staff resolve it and a real
+// handover occurs.
+const HANDOVER_STEPS = [
+  'Seller confirms the product has arrived at the agreed delivery point.',
+  'System sends a readiness notification to the buyer.',
+  'Record BUYER_ARRIVED_AT_HANDOVER when the buyer actually arrives.',
+  'If the buyer arrives and the product is NOT there: record an operational exception, notify operations staff, and do NOT treat the product as received or accepted. State stays DELIVERED; no accept or reject until the exception is resolved and a real handover occurs.',
+  'Record HANDOVER_INSPECTION_COMPLETED after inspection.',
+  'Buyer EXPLICITLY chooses: ACCEPT or REJECT.',
+];
+
+export default function App(props: OperationsPanelProps) {
+  const [tab, setTab] = useState<Tab>('Lifecycle');
+  const [notice, setNotice] = useState<string>('');
+  const [depositReference, setDepositReference] = useState('');
+  const [institutionConfirmed, setInstitutionConfirmed] = useState(false);
+  const [outcomeReference, setOutcomeReference] = useState('');
+  const [outcomeDate, setOutcomeDate] = useState('');
+  const [outcomeDocument, setOutcomeDocument] = useState('');
+
+  const tx = props.initialTransaction ?? null;
+  const base = props.apiBaseUrl ?? '';
+
+  async function post(path: string, body: Record<string, unknown>): Promise<void> {
+    if (!base) {
+      setNotice(
+        'Backend not connected — configure VITE_API_BASE_URL. Nothing was sent.',
+      );
+      return;
+    }
     try {
-      const [health, contracts, conversations, messages, tasks, workflows, templates, users, audit, ks] = await Promise.all([
-        api.health().catch(() => null),
-        api.contracts().catch(() => []),
-        api.conversations().catch(() => []),
-        api.messages().catch(() => []),
-        api.tasks().catch(() => []),
-        api.workflows().catch(() => []),
-        api.templates().catch(() => []),
-        api.users().catch(() => []),
-        api.audit().catch(() => []),
-        api.killSwitchGet().catch(() => ({ killSwitch: false })),
-      ]);
-      setData({ contracts, conversations, messages, tasks, workflows, templates, users, audit, killSwitch: ks.killSwitch, healthOk: !!health?.ok });
-      setErr('');
-    } catch (e) { setErr('تعذر الاتصال بالخادم: ' + (e as Error).message + ' — تأكد أن الخادم يعمل على نفس المضيف.'); }
-  }, []);
-
-  // Session bootstrap: token -> /me, else login screen. A 401 anywhere
-  // clears the token (see api.ts) and fires ps:unauthorized -> login screen.
-  useEffect(() => {
-    const onUnauth = () => setMe(null);
-    window.addEventListener('ps:unauthorized', onUnauth);
-    (async () => {
-      if (getToken()) {
-        try { const u = await api.me(); setMe(u); await reload(); }
-        catch { setMe(null); }
-      }
-      setAuthChecked(true);
-    })();
-    return () => window.removeEventListener('ps:unauthorized', onUnauth);
-  }, [reload]);
-
-  function go(m: MainTab, s?: string) {
-    const nav = NAV.find((n) => n.id === m)!;
-    const subId = s || nav.subs[0]?.id || '';
-    setNav({ main: m, sub: subId });
-    location.hash = subId ? `${m}/${subId}` : m;
-    window.scrollTo(0, 0);
+      const res = await fetch(`${base}${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(props.authToken
+            ? { Authorization: `Bearer ${props.authToken}` }
+            : {}),
+        },
+        body: JSON.stringify(body),
+      });
+      setNotice(
+        res.ok
+          ? 'Recorded on the backend.'
+          : `Backend refused the record (HTTP ${res.status}). Nothing was assumed.`,
+      );
+    } catch {
+      setNotice('Backend request failed. Nothing was assumed.');
+    }
   }
-  async function doLogin(e: React.FormEvent) {
-    e.preventDefault(); setLoginErr(''); setLoggingIn(true);
-    try {
-      const r = await api.login(loginForm.email.trim(), loginForm.password);
-      setToken(r.token); setMe(r.user); setLoginForm({ email: '', password: '' });
-      await reload();
-    } catch (err) { setLoginErr('فشل الدخول: ' + (err as Error).message); }
-    finally { setLoggingIn(false); }
+
+  function onSubmit(
+    path: string,
+    map: (data: FormData) => Record<string, unknown>,
+  ): (event: FormEvent<HTMLFormElement>) => void {
+    return (event) => {
+      event.preventDefault();
+      void post(path, map(new FormData(event.currentTarget)));
+    };
   }
-  function logout() { clearToken(); setMe(null); setData(EMPTY); }
 
-  const brand = (
-    <div className="brand-row">
-      <span className="brand-mark"><IconShield /></span>
-      <span><b className="brand">Pilot System</b><span className="brand-sub">نظام إدارة العقود والمعاملات</span></span>
-    </div>
-  );
-
-  if (!authChecked) return <div className="app"><main><div className="skeleton skeleton-title" /><div className="skeleton" /><div className="skeleton" /><p className="muted">جارٍ التحقق من الجلسة…</p></main></div>;
-  if (!me) return <div className="app login-wrap" dir="rtl">
-    <header className="topbar">{brand}</header>
+  return (
     <main>
-      <section className="card login-card">
-        <div className="login-brand">
-          <span className="brand-mark"><IconShield /></span>
-          <span><b>Pilot System</b><span>نظام إدارة العقود والمعاملات</span></span>
-        </div>
-        <div className="login-body">
-          <h2>تسجيل الدخول</h2>
-          <p className="muted">لا يستطيع أحد الدخول إلا بعد أن يضيفه المسؤول. المسؤول الأساسي يُنشأ عند أول تشغيل من متغيرات بيئة الخادم فقط.</p>
-          <form onSubmit={doLogin}>
-            <label className="field"><span>البريد الإلكتروني</span><input required type="email" autoComplete="email" value={loginForm.email} onChange={(e) => setLoginForm({ ...loginForm, email: e.target.value })} placeholder="name@example.com" /></label>
-            <label className="field"><span>كلمة السر</span><input required type="password" autoComplete="current-password" value={loginForm.password} onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })} /></label>
-            <button className="btn" type="submit" disabled={loggingIn}>{loggingIn ? 'جارٍ الدخول…' : 'دخول'}</button>
-          </form>
-          {loginErr && <p className="login-error" role="alert">{loginErr}</p>}
-        </div>
-      </section>
+      <h1>Pilot System v3.1 — Operations panel (staff only)</h1>
+      <p>
+        Money stays with the external financial institution. This panel
+        records and reviews only — it never executes a transfer,
+        settlement, or refund.
+      </p>
+      <nav aria-label="Operations sections">
+        {TABS.map((name) => (
+          <button
+            key={name}
+            type="button"
+            aria-pressed={tab === name}
+            onClick={() => {
+              setTab(name);
+              setNotice('');
+            }}
+          >
+            {name}
+          </button>
+        ))}
+      </nav>
+      {notice ? <p role="status">{notice}</p> : null}
+      {!tx ? (
+        <p>
+          No transaction loaded. Connect the panel to the backend
+          (VITE_API_BASE_URL) and open a transaction to work it.
+        </p>
+      ) : (
+        <section>
+          {tab === 'Lifecycle' && (
+            <div>
+              <h2>Transaction lifecycle</h2>
+              <p>
+                Transaction {tx.id} — current state: {tx.state}
+              </p>
+              <p>
+                Amount (descriptive only): {tx.amount} {tx.currency} —{' '}
+                {tx.productDescription} × {tx.quantity} — delivery point:{' '}
+                {tx.deliveryPoint}
+              </p>
+              <ol>
+                {STATES.map((state) => (
+                  <li key={state}>
+                    {state}
+                    {state === tx.state ? ' (current)' : ''}
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
+          {tab === 'Evidence' && (
+            <div>
+              <h2>Contract and evidence review</h2>
+              <h3>Contract versions (SHA-256 fingerprint, never overwritten)</h3>
+              <ul>
+                {tx.contractVersions.map((version) => (
+                  <li key={version.versionNumber}>
+                    Version {version.versionNumber}: {version.contentHash}
+                  </li>
+                ))}
+              </ul>
+              <h3>Payment evidence</h3>
+              <p>
+                Evidence is recorded ONLY as Payment Evidence Submitted.
+                It never counts as funding confirmation and never
+                permits shipping.
+              </p>
+              <ul>
+                {tx.evidences.map((evidence, index) => (
+                  <li key={index}>
+                    {evidence.channel} — {evidence.senderName} —{' '}
+                    {evidence.amount} {evidence.currency} — external
+                    payment reference {evidence.externalPaymentReference} —
+                    status: {evidence.status}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {tab === 'Verification' && (
+            <div>
+              <h2>Verification request and manual communication record</h2>
+              <p>
+                Manual path, in order: review the evidence, contact the
+                institution manually, send the information it accepts,
+                request verification, record the response and reference.
+              </p>
+              <form
+                onSubmit={onSubmit(
+                  `/api/transactions/${tx.id}/coordination`,
+                  (data) => ({
+                    contactMethod: String(data.get('contactMethod') ?? ''),
+                    messageSent: String(data.get('messageSent') ?? ''),
+                  }),
+                )}
+              >
+                <label>
+                  Contact method
+                  <input name="contactMethod" required />
+                </label>
+                <label>
+                  Message sent to the institution
+                  <textarea name="messageSent" />
+                </label>
+                <button type="submit">Record verification request</button>
+              </form>
+              <ul>
+                {tx.coordination.map((record, index) => (
+                  <li key={index}>
+                    {record.contactMethod} — response:{' '}
+                    {record.institutionResponse ?? 'awaited'} — deposit
+                    reference: {record.depositReference ?? 'none yet'}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {tab === 'Institution' && (
+            <div>
+              <h2>Institution confirmation and deposit reference record</h2>
+              <p>
+                Funding confirmation requires BOTH: the institution has
+                confirmed, AND a Financial Institution Deposit Reference
+                is recorded. Either missing means no confirmation.
+              </p>
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void post(`/api/transactions/${tx.id}/coordination`, {
+                    contactMethod: 'manual institution confirmation',
+                    depositReference,
+                    institutionConfirmed,
+                  });
+                }}
+              >
+                <label>
+                  Financial Institution Deposit Reference
+                  <input
+                    value={depositReference}
+                    onChange={(event) => setDepositReference(event.target.value)}
+                    required
+                  />
+                </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={institutionConfirmed}
+                    onChange={(event) =>
+                      setInstitutionConfirmed(event.target.checked)
+                    }
+                  />
+                  Institution confirmed this deposit
+                </label>
+                <button
+                  type="submit"
+                  disabled={!depositReference || !institutionConfirmed}
+                >
+                  Record institution confirmation
+                </button>
+              </form>
+            </div>
+          )}
+          {tab === 'Settlement' && (
+            <div>
+              <h2>Manual settlement summary and outcome</h2>
+              <p>
+                The summary is prepared manually by staff. Settlement or
+                refund is recorded as executed ONLY after institution
+                confirmation, with its settlement/refund reference.
+              </p>
+              <form
+                onSubmit={onSubmit(
+                  `/api/transactions/${tx.id}/transition`,
+                  (data) => ({
+                    to: 'SETTLEMENT_PENDING',
+                    settlementSummary: {
+                      deposit_reference: String(data.get('depositReference') ?? ''),
+                      amount: Number(data.get('amount') ?? 0),
+                      currency: String(data.get('currency') ?? ''),
+                      beneficiary_name: String(data.get('beneficiaryName') ?? ''),
+                      delivery_proof_or_dispute_outcome: String(
+                        data.get('deliveryProof') ?? '',
+                      ),
+                    },
+                  }),
+                )}
+              >
+                <label>
+                  Deposit reference
+                  <input name="depositReference" required />
+                </label>
+                <label>
+                  Amount
+                  <input name="amount" type="number" required />
+                </label>
+                <label>
+                  Currency
+                  <input name="currency" required />
+                </label>
+                <label>
+                  Beneficiary name
+                  <input name="beneficiaryName" required />
+                </label>
+                <label>
+                  Delivery proof or dispute outcome
+                  <input name="deliveryProof" required />
+                </label>
+                <button type="submit">Prepare settlement summary</button>
+              </form>
+              <h3>Settlement or refund outcome after external confirmation</h3>
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const summary = tx.settlementSummaries[0];
+                  if (!summary) {
+                    setNotice('Prepare a settlement summary first.');
+                    return;
+                  }
+                  void post(`/api/transactions/${tx.id}/settlement-confirmation`, {
+                    settlementSummaryId: summary.id,
+                    settlementReference: outcomeReference,
+                    confirmationAt: outcomeDate,
+                  });
+                }}
+              >
+                <label>
+                  Settlement or refund reference
+                  <input
+                    value={outcomeReference}
+                    onChange={(event) => setOutcomeReference(event.target.value)}
+                    required
+                  />
+                </label>
+                <label>
+                  Execution date
+                  <input
+                    type="date"
+                    value={outcomeDate}
+                    onChange={(event) => setOutcomeDate(event.target.value)}
+                    required
+                  />
+                </label>
+                <label>
+                  Confirmation document or notice
+                  <input
+                    value={outcomeDocument}
+                    onChange={(event) => setOutcomeDocument(event.target.value)}
+                    required
+                  />
+                </label>
+                <button
+                  type="submit"
+                  disabled={!outcomeReference || !outcomeDate || !outcomeDocument}
+                >
+                  Record outcome after external confirmation
+                </button>
+              </form>
+              <ul>
+                {tx.settlementSummaries.map((summary, index) => (
+                  <li key={index}>
+                    Deposit {summary.depositReference} — settlement{' '}
+                    {summary.settlementReference || 'awaited'} —{' '}
+                    {summary.amount} {summary.currency} — beneficiary{' '}
+                    {summary.beneficiaryName}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {tab === 'Disputes' && (
+            <div>
+              <h2>Dispute and exception follow-up</h2>
+              <p>
+                An open dispute freezes closure and settlement. Only a
+                human resolves it; resolution selects the next allowed
+                step, and execution still requires institution
+                confirmation.
+              </p>
+              <ul>
+                {tx.disputes.map((dispute, index) => (
+                  <li key={index}>
+                    {dispute.reason} — status: {dispute.status} — outcome:{' '}
+                    {dispute.resolutionOutcome ?? 'unresolved'} —{' '}
+                    {dispute.resolution ?? ''}
+                  </li>
+                ))}
+              </ul>
+              <form
+                onSubmit={onSubmit(
+                  `/api/transactions/${tx.id}/dispute-resolution`,
+                  (data) => ({
+                    outcome: String(data.get('outcome') ?? ''),
+                    resolution: String(data.get('resolution') ?? ''),
+                  }),
+                )}
+              >
+                <label>
+                  Resolution outcome
+                  <select name="outcome" required defaultValue="">
+                    <option value="" disabled>
+                      Choose an outcome
+                    </option>
+                    <option value="PROCEED">Proceed</option>
+                    <option value="REFUND">Refund</option>
+                    <option value="CANCELLED">Cancelled</option>
+                  </select>
+                </label>
+                <label>
+                  Resolution text
+                  <textarea name="resolution" required />
+                </label>
+                <button type="submit">Record human resolution</button>
+              </form>
+            </div>
+          )}
+          {tab === 'Handover' && (
+            <div>
+              <h2>Sold as Seen handover — final acceptance at first actual handover</h2>
+              <p>
+                Acceptance happens only by the buyer&apos;s explicit
+                choice at handover, after actual inspection. Silence or
+                elapsed time never counts as acceptance, and no
+                scheduled step accepts on the buyer&apos;s behalf.
+              </p>
+              <ol>
+                {HANDOVER_STEPS.map((step) => (
+                  <li key={step}>{step}</li>
+                ))}
+              </ol>
+              <h3>Recorded handover events</h3>
+              <ul>
+                {tx.deliveryEvents.map((event, index) => (
+                  <li key={index}>
+                    {event.eventType}
+                    {event.note ? ` — ${event.note}` : ''}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {tab === 'Inbox' && (
+            <div>
+              <Inbox
+                layout="desktop"
+                apiBaseUrl={base || undefined}
+                authToken={props.authToken}
+                conversations={[
+                  {
+                    id: tx.id,
+                    transactionId: tx.id,
+                    transactionState: tx.state,
+                    channel: 'whatsapp',
+                    assignedTo: null,
+                    tags: [],
+                    triage: 'open',
+                    notes: [],
+                    messages: tx.messages.map((message) => ({
+                      id: message.id,
+                      direction: message.direction,
+                      text: null,
+                      templateName: message.templateName,
+                      mediaKind: null,
+                      mediaLabel: null,
+                      status: message.status as
+                        | 'QUEUED'
+                        | 'SENT'
+                        | 'DELIVERED'
+                        | 'READ'
+                        | 'FAILED',
+                      isDryRun: message.isDryRun,
+                      date: '',
+                    })),
+                  },
+                ]}
+              />
+            </div>
+          )}
+          {tab === 'Messages' && (
+            <div>
+              <h2>Templates and messages</h2>
+              <p>
+                Local approval and Meta approval are shown separately.
+                A locally-approved but Meta-rejected template is
+                un-sendable, and its rejection reason is shown.
+              </p>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Template</th>
+                    <th>Local approval</th>
+                    <th>Meta approval</th>
+                    <th>Sendable</th>
+                    <th>Rejection reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {tx.templates.map((template) => (
+                    <tr key={template.name}>
+                      <td>{template.name}</td>
+                      <td>{template.localApproval}</td>
+                      <td>{template.metaApproval}</td>
+                      <td>
+                        {template.localApproval === 'APPROVED' &&
+                        template.metaApproval === 'APPROVED'
+                          ? 'Yes'
+                          : 'Un-sendable'}
+                      </td>
+                      <td>{template.rejectionReason ?? ''}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <h3>Messages (dry-run rows are labelled dry-run)</h3>
+              <ul>
+                {tx.messages.map((message) => (
+                  <li key={message.id}>
+                    {message.direction} — {message.status}
+                    {message.isDryRun ? ' — dry-run' : ''} — template:{' '}
+                    {message.templateName ?? 'free text'}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {tab === 'Audit' && (
+            <div>
+              <h2>Audit view (append-only)</h2>
+              <p>
+                This view has no edit or delete action. Every state
+                change, evidence submission, coordination record, and
+                rejected attempt is recorded here.
+              </p>
+              <ul>
+                {tx.audit.map((event, index) => (
+                  <li key={index}>
+                    {event.action} — {event.previousState ?? '—'} →{' '}
+                    {event.newState ?? '—'} — role: {event.actorRole}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {tab === 'Users' && (
+            <div>
+              <h2>User approve and suspend</h2>
+              <ul>
+                {tx.users.map((user) => (
+                  <li key={user.id}>
+                    {user.whatsappNumber} — status: {user.status}{' '}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void post(`/api/users/${user.id}/approve`, {})
+                      }
+                    >
+                      Approve user
+                    </button>{' '}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void post(`/api/users/${user.id}/suspend`, {})
+                      }
+                    >
+                      Suspend user
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </section>
+      )}
     </main>
-  </div>;
-
-  const nav = NAV.find((n) => n.id === main)!;
-  const visibleNav = NAV.filter((n) => hasSection(me, n.section));
-  const mainAllowed = hasSection(me, nav.section);
-  const subDef = nav.subs.find((s) => s.id === sub);
-  const subAllowed = !subDef || (!subDef.section || hasSection(me, subDef.section)) && (!subDef.action || hasAction(me, nav.section, subDef.action));
-  const forbidden = !mainAllowed || !subAllowed;
-  const unread = data.conversations.filter((c) => !c.is_demo).reduce((s, c) => s + (c.unread_count || 0), 0);
-  const activeSubs = nav.subs.filter((s) => (!s.section || hasSection(me, s.section)) && (!s.action || hasAction(me, nav.section, s.action)));
-  const topKey = activeTopKey(main, sub);
-  const visibleTopTabs = TOP_TABS.filter((t) => hasSection(me, t.section));
-
-  const openTasks = data.tasks.filter((t) => t.status !== 'done').length;
-  return <div className={`app ${sideCollapsed ? 'side-collapsed' : ''}`}>
-    {/* Slim utility bar (web/desktop). Brand lives in the sidebar; the
-        user card + logout live in the sidebar footer — never floating. */}
-    <header className="topbar">
-      <div className="topbar-left">
-        <span className="topbar-brand"><span className="brand-mark small"><IconShield /></span><b>Pilot System</b></span>
-        <span className="page-crumb">{nav.label}</span>
-      </div>
-      <div className="top-status">
-        {data.killSwitch && <span className="pill danger">الأتمتة موقوفة</span>}
-        {unread > 0 && <button className="pill" onClick={() => go('inbox')}>غير مقروءة: {unread}</button>}
-        <span className={`pill ${data.healthOk ? 'ok' : 'danger'}`}><span className="dot" />{data.healthOk ? 'متصل' : 'غير متصل'}</span>
-      </div>
-    </header>
-    {/* Phone-only top tab bar (CSS shows it < 820px, hides it >= 820px).
-        Horizontally scrollable pills; the active tab scrolls into view.
-        No burger, no drawer — the sidebar is never rendered on phone. */}
-    <nav className="topnav" aria-label="التنقل الرئيسي">
-      {visibleTopTabs.map((t) => {
-        const Icon = t.icon;
-        return <button key={t.key} className={`tab ${topKey === t.key ? 'active' : ''}`} onClick={() => go(t.main, t.sub)}>
-          <Icon />{t.label}{t.key === 'inbox' && unread > 0 && <span className="unread-badge">{unread}</span>}
-        </button>;
-      })}
-    </nav>
-    {err && <div className="errbar">{err}</div>}
-    <div className="layout">
-      {/* Web/desktop sidebar — ONE component, same permission gating as
-          the phone tabs (visibleNav). Collapsed state is frontend-only. */}
-      <Sidebar me={me} main={main as SideTab} visible={visibleNav.map((n) => n.id as SideTab)}
-        unread={unread} openTasks={openTasks} collapsed={sideCollapsed}
-        onToggleCollapse={toggleSideCollapsed} go={(m) => go(m)} logout={logout}
-        subs={activeSubs.map((s) => ({ id: s.id, label: s.label }))} sub={sub}
-        onGoSub={(id) => go(main, id)} />
-      <main className={main === 'inbox' ? 'main-inbox' : ''}>
-        {/* Dedupe fix (2026-10-30): the pill row is DELETED globally.
-            Subsections live in exactly one place: the expanded sidebar on
-            web, and this single dropdown on phone (CSS hides it >= 820px).
-            No pill row, no second tab row, anywhere. */}
-        {activeSubs.length > 0 && <label className="section-select">
-          <span>قسم {nav.label}</span>
-          <select value={sub} onChange={(e) => go(main, e.target.value)} aria-label={`قسم ${nav.label}`}>
-            {activeSubs.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
-          </select>
-        </label>}
-        {forbidden ? <NoPermission /> : <>
-          {main === 'dashboard' && <Dashboard b={data} reload={reload} onOpenDesigner={hasSection(me, 'whatsapp') ? () => go('whatsapp', 'designer') : undefined} />}
-          {main === 'contracts' && sub === 'versions' && <ContractVersions b={data} />}
-          {main === 'contracts' && sub === 'tasks' && <Tasks b={data} reload={reload} />}
-          {main === 'contracts' && (sub === 'list' || sub === 'new') && <Contracts b={data} reload={reload} sub={sub as 'list' | 'new'} />}
-          {main === 'inbox' && <Inbox b={data} reload={reload} me={me} />}
-          {main === 'whatsapp' && sub === 'overview' && <WhatsAppOverview b={data} reload={reload} />}
-          {main === 'whatsapp' && sub === 'insights' && <WhatsAppInsights b={data} />}
-          {main === 'whatsapp' && sub === 'conversions' && <WhatsAppConversions b={data} />}
-          {main === 'whatsapp' && sub === 'lists' && <ContactLists reload={reload} />}
-          {main === 'whatsapp' && sub === 'segments' && <SegmentsPage />}
-          {main === 'whatsapp' && sub === 'tags' && <TagsPage b={data} reload={reload} />}
-          {main === 'whatsapp' && sub === 'auto-replies' && <AutoReplies b={data} onOpenDesigner={() => go('whatsapp', 'designer')} />}
-          {main === 'whatsapp' && sub === 'designer' && <WorkflowDesigner workflows={data.workflows} templates={data.templates} reload={reload} />}
-          {main === 'whatsapp' && sub === 'user-input' && <UserInputResponses b={data} />}
-          {main === 'whatsapp' && sub === 'handoff' && <HandoffPage b={data} reload={reload} />}
-          {main === 'whatsapp' && sub === 'templates' && <Templates b={data} reload={reload} canEdit={hasAction(me, 'whatsapp', 'edit')} />}
-          {main === 'whatsapp' && sub === 'chat-widget' && <ChatWidgetPage />}
-          {main === 'whatsapp' && sub === 'contacts' && <Contacts b={data} reload={reload} me={me} />}
-          {main === 'whatsapp' && sub === 'media' && <WhatsAppMedia b={data} reload={reload} me={me} />}
-          {main === 'whatsapp' && (sub === 'connection' || sub === 'settings') && <WhatsApp b={data} reload={reload} me={me} sub={sub as 'connection' | 'settings'} />}
-          {main === 'automation' && sub === 'rules' && <Automation b={data} reload={reload} only="rules" />}
-          {main === 'automation' && sub === 'killswitch' && <Automation b={data} reload={reload} only="killswitch" />}
-          {main === 'ai' && <AIWorkspace b={data} sub={sub} />}
-          {main === 'team' && sub === 'members' && <Users b={data} reload={reload} me={me} sub="list" />}
-          {main === 'team' && sub === 'performance' && <TeamPerformance b={data} />}
-          {main === 'team' && sub === 'distribution' && <Distribution b={data} reload={reload} />}
-          {main === 'team' && sub === 'qa' && <QASettings />}
-          {main === 'tickets' && <MyTickets b={data} reload={reload} me={me} />}
-          {main === 'feedback' && <FeedbackPage />}
-          {main === 'users' && <Users b={data} reload={reload} me={me} sub={sub as 'list' | 'add' | 'passwords' | 'permissions' | 'departments'} />}
-          {main === 'audit' && <Audit b={data} />}
-          {main === 'settings' && sub === 'system' && <SystemSettings />}
-          {main === 'settings' && sub === 'billing' && <BillingPage b={data} />}
-          {main === 'settings' && sub === 'webhook' && <WebhookPage />}
-          {main === 'settings' && sub === 'api' && <ApiPage />}
-          {main === 'settings' && sub === 'integrations' && <IntegrationsPage b={data} />}
-        </>}
-      </main>
-    </div>
-  </div>;
+  );
 }
